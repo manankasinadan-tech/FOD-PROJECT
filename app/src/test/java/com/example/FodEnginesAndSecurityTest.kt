@@ -4,13 +4,17 @@ import com.example.fodtracer.core.anomaly.AnomalyEngine
 import com.example.fodtracer.core.comparator.ComparatorEngine
 import com.example.fodtracer.core.comparator.ReferenceBaselineFixtures
 import com.example.fodtracer.core.correlation.CorrelationEngine
+import com.example.fodtracer.core.disasm.BinaryXmlAndArscDecoder
+import com.example.fodtracer.core.disasm.CodeRuntimeCorrelator
 import com.example.fodtracer.core.disasm.DexAndApkDisassembler
 import com.example.fodtracer.core.disasm.ElfDisassembler
 import com.example.fodtracer.core.disasm.FodLogicReconstructor
 import com.example.fodtracer.core.evidence.EvidenceEngine
 import com.example.fodtracer.core.solution.SolutionEngine
+import com.example.fodtracer.data.archives.MarkdownReportExporter
 import com.example.fodtracer.data.serialization.FodJson
 import com.example.fodtracer.data.serialization.ReportAnonymizer
+import com.example.fodtracer.domain.interfaces.AllowedProcTarget
 import com.example.fodtracer.domain.interfaces.SafeSystemPath
 import com.example.fodtracer.domain.interfaces.ShellCommandSpec
 import com.example.fodtracer.domain.models.*
@@ -273,9 +277,120 @@ class FodEnginesAndSecurityTest {
         assertTrue(artifact.neededLibraries.contains("libgoodix_fod.so"))
         assertTrue(artifact.keySymbols.any { it.contains("enable_hbm_fod") })
         assertTrue(artifact.extractedStrings.contains("/sys/class/drm/card0-DSI-1/hbm"))
+        assertTrue(artifact.crossReferences.any { it.contains("enable_hbm_fod") && it.contains("/sys/class/drm/card0-DSI-1/hbm") })
         assertTrue(fullReport.contains("adrp x0, 0x2000"))
         assertTrue(fullReport.contains("; \"/sys/class/drm/card0-DSI-1/hbm\""))
         assertTrue(fullReport.contains("ret"))
+    }
+
+    @Test
+    fun `BinaryXmlAndArscDecoder decodes AXML elements and typed resources_arsc entries`() {
+        val axml = buildSyntheticAxml()
+        val decodedXml = BinaryXmlAndArscDecoder.decodeBinaryXml(axml)
+        assertNotNull(decodedXml)
+        assertTrue(decodedXml!!.contains("<overlay"))
+        assertTrue(decodedXml.contains("com.android.systemui"))
+
+        val arsc = buildSyntheticArsc()
+        val entries = BinaryXmlAndArscDecoder.extractArscEntries(arsc)
+        assertTrue(entries.any { it.contains("config_udfps_hbm_supported = true") })
+    }
+
+    @Test
+    fun `CodeRuntimeCorrelator links TimelineEvents to disassembled code, xrefs, and kernel stack`() {
+        val elfParsed = ElfDisassembler.analyze(
+            id = "DIS-ELF-CORR",
+            path = "/vendor/lib64/hw/fingerprint.fod.so",
+            partition = PartitionOrigin.VENDOR,
+            bytes = buildSyntheticAarch64Elf()
+        )!!
+        val events = listOf(
+            TimelineEvent(
+                id = "EVT-1",
+                type = TimelineEventType.HBM_ENABLED,
+                monotonicNanos = 100L,
+                relativeMs = 15L,
+                civilTimestampMs = 1000L,
+                source = "/sys/class/drm/card0-DSI-1/hbm",
+                data = "/sys/class/drm/card0-DSI-1/hbm: 0 -> 1",
+                evidenceId = "EV-1",
+                confidence = ConfidenceLevel.HIGH,
+                observationType = ObservationType.STATE_TRANSITION
+            )
+        )
+        val snaps = listOf(
+            ProcessRuntimeSnapshot(
+                processName = "surfaceflinger",
+                pid = 777,
+                openFodDescriptors = listOf("3 -> /dev/dri/card0"),
+                loadedFodLibraries = listOf("/vendor/lib64/hw/fingerprint.fod.so"),
+                kernelStack = listOf("[<0>] drm_ioctl+0x40/0x90"),
+                wchan = "ep_poll"
+            )
+        )
+
+        val correlated = CodeRuntimeCorrelator.correlateTimelineEvents(
+            events = events,
+            artifacts = listOf(elfParsed.first),
+            runtimeSnapshots = snaps
+        )
+        assertEquals(1, correlated.size)
+        val evt = correlated.first()
+        assertTrue(evt.codeRefs.any {
+            it.artifactPath == "/vendor/lib64/hw/fingerprint.fod.so" &&
+                it.symbolOrMethod.contains("enable_hbm_fod")
+        })
+        assertNotNull(evt.procStateNote)
+        assertTrue(evt.procStateNote!!.contains("ep_poll"))
+    }
+
+    @Test
+    fun `MarkdownReportExporter renders complete single MD with inline disassembly and anonymization`() {
+        val baseline = ReferenceBaselineFixtures.createFailingGsiBaseline()
+        val elfParsed = ElfDisassembler.analyze(
+            id = "DIS-ELF-MD",
+            path = "/vendor/lib64/hw/fingerprint.fod.so",
+            partition = PartitionOrigin.VENDOR,
+            bytes = buildSyntheticAarch64Elf()
+        )!!
+        val enrichedSession = baseline.copy(
+            disassembledArtifacts = listOf(elfParsed.first),
+            rawArtifacts = mapOf(elfParsed.first.rawFileName!! to elfParsed.second),
+            liveTrace = baseline.liveTrace?.copy(
+                binderTransactions = listOf("outgoing transaction 42: biometric->enroll"),
+                tracefsEvents = listOf("drm_mode_atomic_commit: hbm=1"),
+                runtimeSnapshots = listOf(
+                    ProcessRuntimeSnapshot(
+                        processName = "android.hardware.biometrics.fingerprint-service",
+                        pid = 901,
+                        openFodDescriptors = listOf("5 -> /dev/goodix_fp"),
+                        loadedFodLibraries = listOf("/vendor/lib64/hw/fingerprint.fod.so"),
+                        kernelStack = listOf("[<0>] goodix_fp_ioctl+0x12/0x44"),
+                        wchan = "wait_woken"
+                    )
+                )
+            )
+        )
+
+        val anonymized = ReportAnonymizer.anonymize(enrichedSession)
+        val md = MarkdownReportExporter.generateMarkdown(anonymized)
+
+        assertTrue(md.contains("# FodTracer — Rapport Complet d'Investigation FOD / UDFPS"))
+        assertTrue(md.contains("## 5. Chronologie LIVE Corrélée au Code"))
+        assertTrue(md.contains("outgoing transaction 42: biometric->enroll"))
+        assertTrue(md.contains("drm_mode_atomic_commit: hbm=1"))
+        assertTrue(md.contains("goodix_fp_ioctl+0x12/0x44"))
+        assertTrue(md.contains("## 11. Désassemblage Complet & Listings Bruts"))
+        assertTrue(md.contains("adrp x0, 0x2000"))
+    }
+
+    @Test
+    fun `SafeShellExecutor ReadSystemHead reads bounded lines cleanly`() = runTest {
+        val executor = SafeShellExecutor()
+        val cpuInfo = SafeSystemPath.parse("/proc/cpuinfo")!!
+        val res = executor.execute(ShellCommandSpec.ReadSystemHead(cpuInfo, lines = 2), useRoot = false)
+        assertFalse(res.timedOut)
+        assertTrue(res.stdout.lines().count { it.isNotBlank() } <= 3)
     }
 
     @Test
@@ -489,6 +604,144 @@ class FodEnginesAndSecurityTest {
         buf.position(dataBaseOff)
         buf.put(stringDataOut.toByteArray())
         return buf.array()
+    }
+
+    private fun buildSyntheticAxml(): ByteArray {
+        val strings = listOf("overlay", "targetPackage", "com.android.systemui")
+        val poolChunk = buildUtf8StringPoolChunk(strings)
+
+        // START_ELEMENT (36 bytes + 1 attr * 20 bytes = 56 bytes)
+        val startElem = ByteBuffer.allocate(56).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0102.toShort()) // type
+            putShort(16.toShort())     // headerSize
+            putInt(56)                 // chunkSize
+            putInt(1)                  // lineNumber
+            putInt(-1)                 // comment
+            putInt(-1)                 // ns
+            putInt(0)                  // name -> "overlay"
+            putShort(20.toShort())     // attributeStart (from +16)
+            putShort(20.toShort())     // attributeSize
+            putShort(1.toShort())      // attributeCount
+            putShort(0.toShort())      // idIndex
+            putShort(0.toShort())      // classIndex
+            putShort(0.toShort())      // styleIndex
+            // Attribute 0 at offset 36
+            putInt(-1)                 // ns
+            putInt(1)                  // name -> "targetPackage"
+            putInt(2)                  // rawValue -> "com.android.systemui"
+            putShort(8.toShort())      // typedValue size
+            put(0.toByte())            // res0
+            put(0x03.toByte())         // TYPE_STRING
+            putInt(2)                  // data -> "com.android.systemui"
+        }.array()
+
+        // END_ELEMENT (24 bytes)
+        val endElem = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0103.toShort())
+            putShort(16.toShort())
+            putInt(24)
+            putInt(1)
+            putInt(-1)
+            putInt(-1)
+            putInt(0) // "overlay"
+        }.array()
+
+        val total = 8 + poolChunk.size + startElem.size + endElem.size
+        return ByteBuffer.allocate(total).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0003.toShort()) // RES_XML_TYPE
+            putShort(8.toShort())
+            putInt(total)
+            put(poolChunk)
+            put(startElem)
+            put(endElem)
+        }.array()
+    }
+
+    private fun buildSyntheticArsc(): ByteArray {
+        val globalPool = buildUtf8StringPoolChunk(listOf("global"))
+        val typePool = buildUtf8StringPoolChunk(listOf("bool"))
+        val keyPool = buildUtf8StringPoolChunk(listOf("config_udfps_hbm_supported"))
+
+        // RES_TABLE_TYPE_TYPE (header 68 bytes, 1 offset (4 bytes), 1 entry (8 bytes) + Res_value (8 bytes) = 88 bytes)
+        val typeHeaderSize = 68
+        val entriesStartRel = typeHeaderSize + 4
+        val typeChunkSize = entriesStartRel + 16
+        val typeChunk = ByteBuffer.allocate(typeChunkSize).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0201.toShort())
+            putShort(typeHeaderSize.toShort())
+            putInt(typeChunkSize)
+            put(1.toByte()) // id=1 ("bool")
+            put(0.toByte()) // flags=0
+            putShort(0.toShort())
+            putInt(1) // entryCount
+            putInt(entriesStartRel) // entriesStart
+            // offset table at typeHeaderSize
+            putInt(typeHeaderSize, 0)
+            // ResTable_entry at entriesStartRel
+            putShort(entriesStartRel, 8.toShort()) // size
+            putShort(entriesStartRel + 2, 0.toShort()) // flags=0 (simple)
+            putInt(entriesStartRel + 4, 0) // key idx 0 -> "config_udfps_hbm_supported"
+            // Res_value at entriesStartRel + 8
+            putShort(entriesStartRel + 8, 8.toShort())
+            put(entriesStartRel + 10, 0.toByte())
+            put(entriesStartRel + 11, 0x12.toByte()) // TYPE_INT_BOOLEAN
+            putInt(entriesStartRel + 12, -1) // true
+        }.array()
+
+        val pkgHeaderSize = 288
+        val typeStringsRel = pkgHeaderSize
+        val keyStringsRel = typeStringsRel + typePool.size
+        val pkgSize = pkgHeaderSize + typePool.size + keyPool.size + typeChunk.size
+        val pkgChunk = ByteBuffer.allocate(pkgSize).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0200.toShort())
+            putShort(pkgHeaderSize.toShort())
+            putInt(pkgSize)
+            putInt(0x7F) // pkg id
+            putInt(268, typeStringsRel)
+            putInt(276, keyStringsRel)
+            position(pkgHeaderSize)
+            put(typePool)
+            put(keyPool)
+            put(typeChunk)
+        }.array()
+
+        val totalSize = 12 + globalPool.size + pkgChunk.size
+        return ByteBuffer.allocate(totalSize).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0002.toShort()) // RES_TABLE_TYPE
+            putShort(12.toShort())
+            putInt(totalSize)
+            putInt(1) // packageCount
+            put(globalPool)
+            put(pkgChunk)
+        }.array()
+    }
+
+    private fun buildUtf8StringPoolChunk(strings: List<String>): ByteArray {
+        val dataOut = ByteArrayOutputStream()
+        val offsets = IntArray(strings.size)
+        strings.forEachIndexed { idx, s ->
+            offsets[idx] = dataOut.size()
+            val utf8 = s.toByteArray(StandardCharsets.UTF_8)
+            dataOut.write(s.length)
+            dataOut.write(utf8.size)
+            dataOut.write(utf8)
+            dataOut.write(0)
+        }
+        while (dataOut.size() % 4 != 0) dataOut.write(0)
+        val stringsStartRel = 28 + strings.size * 4
+        val chunkSize = stringsStartRel + dataOut.size()
+        return ByteBuffer.allocate(chunkSize).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0001.toShort())
+            putShort(28.toShort())
+            putInt(chunkSize)
+            putInt(strings.size)
+            putInt(0) // styleCount
+            putInt(1 shl 8) // UTF8_FLAG
+            putInt(stringsStartRel)
+            putInt(0) // stylesStart
+            offsets.forEach { putInt(it) }
+            put(dataOut.toByteArray())
+        }.array()
     }
 }
 

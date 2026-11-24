@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -33,6 +34,7 @@ fun ArchivesScreen(
     feedbackMessage: String?,
     onBack: () -> Unit,
     onExportSession: (DiagnosticSession, Boolean, Uri?) -> Unit,
+    onExportMarkdown: (DiagnosticSession, Boolean, Uri?) -> Unit,
     onImportZip: (Uri) -> Unit,
     onOpenSession: (String) -> Unit,
     onDeleteSession: (String) -> Unit,
@@ -42,6 +44,7 @@ fun ArchivesScreen(
     val strings = LocalFodStrings.current
     var anonymizeExport by remember(anonymizeDefault) { mutableStateOf(anonymizeDefault) }
     var pendingExportSession by remember { mutableStateOf<DiagnosticSession?>(null) }
+    var pendingMdExportSession by remember { mutableStateOf<DiagnosticSession?>(null) }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -56,6 +59,16 @@ fun ArchivesScreen(
         pendingExportSession = null
         if (uri != null && sess != null) {
             onExportSession(sess, anonymizeExport, uri)
+        }
+    }
+
+    val createMdLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/markdown")
+    ) { uri ->
+        val sess = pendingMdExportSession
+        pendingMdExportSession = null
+        if (uri != null && sess != null) {
+            onExportMarkdown(sess, anonymizeExport, uri)
         }
     }
 
@@ -125,7 +138,7 @@ fun ArchivesScreen(
                         StatusTag(session.environment.detectedRomType.name, MaterialTheme.colorScheme.primary)
                     }
                     Spacer(Modifier.height(4.dp))
-                    Text("${session.sessionId} • v${session.schemaVersion} • ${session.anomalies.size} anom", style = MonoTextStyle)
+                    Text("${session.sessionId} • v${session.schemaVersion} • ${session.anomalies.size} anom • ${session.disassembledArtifacts.size} disasm", style = MonoTextStyle)
                     Spacer(Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
@@ -149,7 +162,7 @@ fun ArchivesScreen(
                             },
                             modifier = Modifier.minimumInteractiveComponentSize()
                         ) {
-                            Icon(Icons.Filled.FileOpen, contentDescription = "SAF Export")
+                            Icon(Icons.Filled.FileOpen, contentDescription = "SAF ZIP Export")
                         }
                         IconButton(
                             onClick = { onDeleteSession(session.sessionId) },
@@ -158,13 +171,41 @@ fun ArchivesScreen(
                             Icon(Icons.Filled.DeleteOutline, contentDescription = strings.deleteLabel)
                         }
                     }
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilledTonalButton(
+                            onClick = { onExportMarkdown(session, anonymizeExport, null) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .minimumInteractiveComponentSize()
+                                .testTag("export_md_archive_${session.sessionId}")
+                        ) {
+                            Icon(Icons.Filled.Description, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(strings.exportMd, maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                pendingMdExportSession = session
+                                createMdLauncher.launch("${session.sessionId}.md")
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .minimumInteractiveComponentSize()
+                                .testTag("export_md_saf_archive_${session.sessionId}")
+                        ) {
+                            Icon(Icons.Filled.FileOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(strings.exportMdSaf, maxLines = 1)
+                        }
+                    }
                 }
             }
 
             if (publicExports.isNotEmpty()) {
                 item {
                     LabCard(modifier = Modifier.fillMaxWidth()) {
-                        Text("ZIP Exports (${publicExports.size})", style = MaterialTheme.typography.titleMedium)
+                        Text("ZIP / MD Exports (${publicExports.size})", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(6.dp))
                         MonoCodeBlock(publicExports.joinToString("\n"))
                     }

@@ -79,7 +79,13 @@ data class FodStrings(
     val langEnglish: String,
     val aiSectionTitle: String,
     val shellAuditTitle: String,
-    val seLinuxNotice: String
+    val seLinuxNotice: String,
+    val exportMd: String,
+    val exportMdSaf: String,
+    val correlatedCodeTitle: String,
+    val crossReferencesTitle: String,
+    val decodedResourcesTitle: String,
+    val deepTelemetryTitle: String
 )
 
 val FrenchFodStrings = FodStrings(
@@ -154,7 +160,13 @@ val FrenchFodStrings = FodStrings(
     langEnglish = "English",
     aiSectionTitle = "Assistant IA (Facultatif)",
     shellAuditTitle = "Journal d'exécution sécurisé",
-    seLinuxNotice = "Lecture seule stricte : FodTracer ne désactive jamais SELinux."
+    seLinuxNotice = "Lecture seule stricte : FodTracer ne désactive jamais SELinux.",
+    exportMd = "Exporter MD",
+    exportMdSaf = "Exporter MD (Choisir…)",
+    correlatedCodeTitle = "Code / Binaire corrélé",
+    crossReferencesTitle = "Références croisées (Appels -> Cibles)",
+    decodedResourcesTitle = "Ressources décodées (AXML / ARSC)",
+    deepTelemetryTitle = "Télémétrie Root (Binder / Tracefs / Stacks)"
 )
 
 val EnglishFodStrings = FodStrings(
@@ -229,7 +241,13 @@ val EnglishFodStrings = FodStrings(
     langEnglish = "English",
     aiSectionTitle = "AI Advisor (Optional)",
     shellAuditTitle = "Safe Shell Execution Log",
-    seLinuxNotice = "Strict read-only mode: FodTracer never disables SELinux."
+    seLinuxNotice = "Strict read-only mode: FodTracer never disables SELinux.",
+    exportMd = "Export MD",
+    exportMdSaf = "Export MD (Save As…)",
+    correlatedCodeTitle = "Correlated Code / Binary",
+    crossReferencesTitle = "Cross-References (Calls -> Targets)",
+    decodedResourcesTitle = "Decoded Resources (AXML / ARSC)",
+    deepTelemetryTitle = "Deep Root Telemetry (Binder / Tracefs / Stacks)"
 )
 
 val LocalFodStrings = staticCompositionLocalOf { EnglishFodStrings }

@@ -11,11 +11,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import android.net.Uri
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
@@ -58,6 +61,7 @@ fun DiagnosticScreen(
     onRequestAiConsent: () -> Unit,
     onDismissAiConsent: () -> Unit,
     onConfirmAiAnalysis: () -> Unit,
+    onExportMarkdown: (Uri?) -> Unit,
     onClearStatusMessage: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -69,6 +73,14 @@ fun DiagnosticScreen(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
         // Enrollment Activity returned; let user inspect or finalize cleanly.
+    }
+
+    val createMdLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/markdown")
+    ) { uri ->
+        if (uri != null) {
+            onExportMarkdown(uri)
+        }
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -101,6 +113,28 @@ fun DiagnosticScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack, modifier = Modifier.minimumInteractiveComponentSize()) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
+                    }
+                },
+                actions = {
+                    if (activeSession != null) {
+                        TextButton(
+                            onClick = { onExportMarkdown(null) },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("export_md_diagnostic_button")
+                        ) {
+                            Icon(Icons.Filled.Description, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(strings.exportMd)
+                        }
+                        IconButton(
+                            onClick = { createMdLauncher.launch("${activeSession.sessionId}.md") },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("export_md_saf_diagnostic_button")
+                        ) {
+                            Icon(Icons.Filled.FileOpen, contentDescription = strings.exportMdSaf)
+                        }
                     }
                 }
             )
@@ -390,7 +424,11 @@ private fun DashboardSectionContent(
                         LabCard(modifier = Modifier.fillMaxWidth()) {
                             Text("Duration: ${live.durationMs}ms • Sources: ${live.observedSources.size}", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(4.dp))
-                            Text("Post-return Biometric Check: ${live.enrollmentReturnedWithBiometricCheck}", style = MonoTextStyle)
+                            Text(
+                                "Post-return Biometric: ${live.enrollmentReturnedWithBiometricCheck}\n" +
+                                    "procfs=${live.runtimeSnapshots.size} • binder=${live.binderTransactions.size} • tracefs=${live.tracefsEvents.size} • dumpsysDiffs=${live.dumpsysDiffs.size}",
+                                style = MonoTextStyle
+                            )
                         }
                     }
                     items(live.events, key = { it.id }) { evt ->
@@ -406,6 +444,21 @@ private fun DashboardSectionContent(
                             Text("${evt.source} • ${evt.observationType.name}", style = MaterialTheme.typography.bodyMedium)
                             Spacer(Modifier.height(4.dp))
                             MonoCodeBlock(evt.data)
+                            evt.procStateNote?.let { note ->
+                                Spacer(Modifier.height(6.dp))
+                                MonoCodeBlock("/proc State: $note")
+                            }
+                            if (evt.codeRefs.isNotEmpty()) {
+                                Spacer(Modifier.height(6.dp))
+                                val refsBlock = evt.codeRefs.joinToString("\n") { ref ->
+                                    val base = "${ref.artifactPath} -> ${ref.symbolOrMethod}" +
+                                        (ref.targetResource?.let { " [$it]" } ?: "")
+                                    if (ref.callerChain.isNotEmpty()) {
+                                        base + "\n  " + ref.callerChain.joinToString("\n  ")
+                                    } else base
+                                }
+                                MonoCodeBlock("${strings.correlatedCodeTitle}:\n$refsBlock")
+                            }
                         }
                     }
                 }
@@ -574,6 +627,28 @@ private fun DashboardSectionContent(
                     }
                 }
 
+                session.liveTrace?.let { live ->
+                    if (live.binderTransactions.isNotEmpty() || live.tracefsEvents.isNotEmpty() || live.dumpsysDiffs.isNotEmpty()) {
+                        item {
+                            LabCard(modifier = Modifier.fillMaxWidth()) {
+                                Text(strings.deepTelemetryTitle, style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.height(6.dp))
+                                if (live.binderTransactions.isNotEmpty()) {
+                                    MonoCodeBlock("binder_logs (${live.binderTransactions.size}):\n" + live.binderTransactions.take(15).joinToString("\n"))
+                                    Spacer(Modifier.height(6.dp))
+                                }
+                                if (live.tracefsEvents.isNotEmpty()) {
+                                    MonoCodeBlock("tracefs (${live.tracefsEvents.size}):\n" + live.tracefsEvents.take(15).joinToString("\n"))
+                                    Spacer(Modifier.height(6.dp))
+                                }
+                                if (live.dumpsysDiffs.isNotEmpty()) {
+                                    MonoCodeBlock("dumpsys deltas:\n" + live.dumpsysDiffs.take(10).joinToString("\n"))
+                                }
+                            }
+                        }
+                    }
+                }
+
                 item {
                     LabCard(modifier = Modifier.fillMaxWidth()) {
                         Text(strings.disassembledFilesTitle, style = MaterialTheme.typography.titleMedium)
@@ -644,12 +719,20 @@ private fun DashboardSectionContent(
                                 }
                             }
                             if (expanded) {
+                                if (artifact.decodedResources.isNotEmpty()) {
+                                    MonoCodeBlock("${strings.decodedResourcesTitle}:\n" + artifact.decodedResources.take(30).joinToString("\n"))
+                                    Spacer(Modifier.height(6.dp))
+                                }
+                                if (artifact.crossReferences.isNotEmpty()) {
+                                    MonoCodeBlock("${strings.crossReferencesTitle}:\n" + artifact.crossReferences.take(30).joinToString("\n"))
+                                    Spacer(Modifier.height(6.dp))
+                                }
                                 if (artifact.keySymbols.isNotEmpty()) {
-                                    MonoCodeBlock("Key Symbols:\n" + artifact.keySymbols.take(24).joinToString("\n"))
+                                    MonoCodeBlock("Key Symbols:\n" + artifact.keySymbols.take(30).joinToString("\n"))
                                     Spacer(Modifier.height(6.dp))
                                 }
                                 if (artifact.extractedStrings.isNotEmpty()) {
-                                    MonoCodeBlock("Extracted Strings/FDs:\n" + artifact.extractedStrings.take(24).joinToString("\n"))
+                                    MonoCodeBlock("Extracted Strings/FDs:\n" + artifact.extractedStrings.take(30).joinToString("\n"))
                                     Spacer(Modifier.height(6.dp))
                                 }
                                 if (artifact.disassemblySnippet.isNotBlank()) {

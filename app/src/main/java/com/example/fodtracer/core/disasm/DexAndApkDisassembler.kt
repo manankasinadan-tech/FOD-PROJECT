@@ -13,14 +13,15 @@ import java.util.zip.ZipInputStream
 
 /**
  * Pure-Kotlin APK/JAR/DEX/RRO disassembler & analyzer.
- * Parses DEX headers, string/type/method tables, class_defs, and Dalvik bytecode instructions
- * for FOD/UDFPS/Biometric/HBM classes — 100% read-only without executing or loading external code.
+ * Decodes Android Binary XML (AXML) and compiled resources.arsc typed values, parses DEX headers,
+ * string/type/method tables, class_defs, Dalvik bytecode instructions, and caller->callee cross-references.
  */
 object DexAndApkDisassembler {
 
     private val FOD_CLASS_KEYWORDS = listOf(
         "udfps", "fod", "fingerprint", "biometric", "authcontroller",
-        "hbm", "lhbm", "displaypower", "doze", "phh", "treble"
+        "hbm", "lhbm", "displaypower", "displaymode", "doze", "phh", "treble",
+        "keyguard", "touch", "brightness"
     )
 
     private val FOD_RESOURCE_KEYWORDS = listOf(
@@ -36,6 +37,7 @@ object DexAndApkDisassembler {
         zipBytes: ByteArray
     ): Pair<DisassembledArtifact, String>? {
         val dexEntries = linkedMapOf<String, ByteArray>()
+        val extraXmlEntries = linkedMapOf<String, ByteArray>()
         var resourcesBytes: ByteArray? = null
         var manifestBytes: ByteArray? = null
 
@@ -43,18 +45,22 @@ object DexAndApkDisassembler {
             ZipInputStream(ByteArrayInputStream(zipBytes)).use { zis ->
                 var entry = zis.nextEntry
                 var count = 0
-                while (entry != null && count < 2048) {
+                while (entry != null && count < 4096) {
                     count++
                     val name = entry.name
                     when {
-                        name.matches(Regex("^classes\\d*\\.dex$")) && dexEntries.size < 3 -> {
-                            dexEntries[name] = readBounded(zis, 4_194_304)
+                        name.matches(Regex("^classes\\d*\\.dex$")) && dexEntries.size < 8 -> {
+                            dexEntries[name] = readBounded(zis, 6_291_456)
                         }
                         name == "resources.arsc" && resourcesBytes == null -> {
-                            resourcesBytes = readBounded(zis, 2_097_152)
+                            resourcesBytes = readBounded(zis, 4_194_304)
                         }
                         name == "AndroidManifest.xml" && manifestBytes == null -> {
                             manifestBytes = readBounded(zis, 524_288)
+                        }
+                        name.startsWith("res/xml/") && name.endsWith(".xml") && extraXmlEntries.size < 12 &&
+                            FOD_RESOURCE_KEYWORDS.any { name.contains(it, ignoreCase = true) } -> {
+                            extraXmlEntries[name] = readBounded(zis, 131_072)
                         }
                     }
                     zis.closeEntry()
@@ -63,29 +69,60 @@ object DexAndApkDisassembler {
             }
         }
 
-        if (dexEntries.isEmpty() && resourcesBytes == null && manifestBytes == null) return null
+        if (dexEntries.isEmpty() && resourcesBytes == null && manifestBytes == null && extraXmlEntries.isEmpty()) {
+            return null
+        }
 
-        val manifestStrings = manifestBytes?.let { extractPrintableStrings(it, FOD_RESOURCE_KEYWORDS + listOf("package", "target", "systemui", "android"), 40) }.orEmpty()
-        val resourceStrings = resourcesBytes?.let { extractPrintableStrings(it, FOD_RESOURCE_KEYWORDS, 80) }.orEmpty()
+        val decodedManifestXml = manifestBytes?.let { BinaryXmlAndArscDecoder.decodeBinaryXml(it) }
+        val decodedResXmls = extraXmlEntries.mapNotNull { (entryName, xmlBytes) ->
+            val decoded = BinaryXmlAndArscDecoder.decodeBinaryXml(xmlBytes)
+                ?: extractPrintableStrings(xmlBytes, FOD_RESOURCE_KEYWORDS, 25).joinToString("\n")
+            if (decoded.isNotBlank()) entryName to decoded else null
+        }
+
+        val arscEntries = resourcesBytes?.let {
+            BinaryXmlAndArscDecoder.extractArscEntries(it, filterFodOnly = !isOverlay)
+        }.orEmpty()
+        val manifestStrings = manifestBytes?.let {
+            extractPrintableStrings(it, FOD_RESOURCE_KEYWORDS + listOf("package", "target", "systemui", "android"), 60)
+        }.orEmpty()
+        val resourceStrings = resourcesBytes?.let {
+            extractPrintableStrings(it, FOD_RESOURCE_KEYWORDS, 120)
+        }.orEmpty()
 
         val allClassSummaries = mutableListOf<String>()
+        val allXrefs = mutableListOf<String>()
         val allDisasm = StringBuilder()
         allDisasm.appendLine("=== FodTracer APK/DEX/RRO Analysis ===")
         allDisasm.appendLine("File: $path")
         allDisasm.appendLine("Kind: ${if (isOverlay) "RRO_OVERLAY" else "APK_DEX"} | DEX files: ${dexEntries.keys.joinToString()}")
-        if (manifestStrings.isNotEmpty()) {
+
+        if (!decodedManifestXml.isNullOrBlank()) {
+            allDisasm.appendLine("\n[Decoded AndroidManifest.xml (AXML)]")
+            allDisasm.appendLine(decodedManifestXml.lines().take(60).joinToString("\n"))
+        } else if (manifestStrings.isNotEmpty()) {
             allDisasm.appendLine("\n[AndroidManifest Strings]")
             manifestStrings.forEach { allDisasm.appendLine("  $it") }
         }
-        if (resourceStrings.isNotEmpty()) {
+
+        if (arscEntries.isNotEmpty()) {
+            allDisasm.appendLine("\n[Decoded resources.arsc Values (${arscEntries.size})]")
+            arscEntries.forEach { allDisasm.appendLine("  $it") }
+        } else if (resourceStrings.isNotEmpty()) {
             allDisasm.appendLine("\n[resources.arsc FOD/UDFPS Config Strings]")
             resourceStrings.forEach { allDisasm.appendLine("  $it") }
+        }
+
+        decodedResXmls.forEach { (name, xmlText) ->
+            allDisasm.appendLine("\n[Decoded $name (AXML)]")
+            allDisasm.appendLine(xmlText.lines().take(60).joinToString("\n"))
         }
 
         dexEntries.forEach { (dexName, dexBytes) ->
             val dexParsed = parseDexBytes(dexName, dexBytes)
             if (dexParsed != null) {
                 allClassSummaries += dexParsed.classSummaries
+                allXrefs += dexParsed.crossReferences
                 allDisasm.appendLine()
                 allDisasm.append(dexParsed.disassemblyReport)
             }
@@ -93,7 +130,19 @@ object DexAndApkDisassembler {
 
         val fullReport = allDisasm.toString()
         val rawFileName = "disassembly/${path.trim('/').replace('/', '_')}.dex.txt"
-        val combinedStrings = (manifestStrings + resourceStrings).distinct().take(80)
+        val combinedStrings = (manifestStrings + resourceStrings).distinct().take(120)
+        val decodedResList = buildList {
+            addAll(arscEntries)
+            decodedManifestXml?.lines()?.filter {
+                it.contains("package=", true) || it.contains("targetPackage", true) ||
+                    it.contains("FINGERPRINT", true) || it.contains("BIOMETRIC", true)
+            }?.take(10)?.forEach { add("manifest: ${it.trim()}") }
+            decodedResXmls.forEach { (n, x) ->
+                x.lines().take(8).forEach { line ->
+                    if (line.isNotBlank()) add("$n: ${line.trim()}")
+                }
+            }
+        }.distinct().take(150)
 
         val artifact = DisassembledArtifact(
             id = id,
@@ -101,20 +150,23 @@ object DexAndApkDisassembler {
             path = path,
             partition = partition,
             kind = if (isOverlay) ArtifactKind.RRO_OVERLAY else ArtifactKind.APK_DEX,
-            architecture = "Dalvik/DEX",
+            architecture = "Dalvik/DEX + AXML/ARSC",
             neededLibraries = dexEntries.keys.toList(),
-            keySymbols = allClassSummaries.distinct().take(80),
+            keySymbols = allClassSummaries.distinct().take(160),
             extractedStrings = combinedStrings,
-            disassemblySnippet = fullReport.lines().take(60).joinToString("\n"),
+            disassemblySnippet = fullReport.lines().take(75).joinToString("\n"),
             epistemicLevel = EpistemicLevel.PROVED,
-            rawFileName = rawFileName
+            rawFileName = rawFileName,
+            crossReferences = allXrefs.distinct().take(120),
+            decodedResources = decodedResList
         )
         return artifact to fullReport
     }
 
     data class DexParseOutput(
         val classSummaries: List<String>,
-        val disassemblyReport: String
+        val disassemblyReport: String,
+        val crossReferences: List<String> = emptyList()
     )
 
     fun parseDexBytes(dexName: String, bytes: ByteArray): DexParseOutput? {
@@ -124,15 +176,15 @@ object DexAndApkDisassembler {
         }
 
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val stringIdsSize = buf.getInt(56).coerceIn(0, 200_000)
+        val stringIdsSize = buf.getInt(56).coerceIn(0, 250_000)
         val stringIdsOff = buf.getInt(60)
-        val typeIdsSize = buf.getInt(64).coerceIn(0, 100_000)
+        val typeIdsSize = buf.getInt(64).coerceIn(0, 120_000)
         val typeIdsOff = buf.getInt(68)
-        val fieldIdsSize = buf.getInt(76).coerceIn(0, 150_000)
+        val fieldIdsSize = buf.getInt(76).coerceIn(0, 200_000)
         val fieldIdsOff = buf.getInt(80)
-        val methodIdsSize = buf.getInt(84).coerceIn(0, 200_000)
+        val methodIdsSize = buf.getInt(84).coerceIn(0, 250_000)
         val methodIdsOff = buf.getInt(88)
-        val classDefsSize = buf.getInt(96).coerceIn(0, 50_000)
+        val classDefsSize = buf.getInt(96).coerceIn(0, 80_000)
         val classDefsOff = buf.getInt(100)
 
         val strings = Array(stringIdsSize) { idx ->
@@ -171,6 +223,7 @@ object DexAndApkDisassembler {
         }
 
         val summaries = mutableListOf<String>()
+        val xrefs = mutableListOf<String>()
         val report = StringBuilder()
         report.appendLine("--- DEX: $dexName (classes=$classDefsSize, methods=$methodIdsSize) ---")
 
@@ -184,7 +237,7 @@ object DexAndApkDisassembler {
             if (!FOD_CLASS_KEYWORDS.any { className.contains(it, ignoreCase = true) }) continue
 
             analyzedClasses++
-            if (analyzedClasses > 25) break
+            if (analyzedClasses > 80) break
 
             val superIdx = buf.getInt(base + 8)
             val superName = if (superIdx >= 0) typeName(superIdx).removePrefix("L").removeSuffix(";").replace('/', '.') else "Object"
@@ -195,6 +248,7 @@ object DexAndApkDisassembler {
 
             if (classDataOff in 1 until bytes.size) {
                 parseClassDataAndDisassemble(
+                    className = className,
                     bytes = bytes,
                     buf = buf,
                     startOff = classDataOff,
@@ -202,15 +256,22 @@ object DexAndApkDisassembler {
                     methodLookup = ::methodName,
                     fieldLookup = ::fieldName,
                     outReport = report,
-                    outSummaries = summaries
+                    outSummaries = summaries,
+                    outXrefs = xrefs
                 )
             }
         }
 
-        return DexParseOutput(summaries, report.toString())
+        if (xrefs.isNotEmpty()) {
+            report.appendLine("\n[DEX Method Cross-References (${xrefs.size})]")
+            xrefs.forEach { report.appendLine("  $it") }
+        }
+
+        return DexParseOutput(summaries, report.toString(), xrefs)
     }
 
     private fun parseClassDataAndDisassemble(
+        className: String,
         bytes: ByteArray,
         buf: ByteBuffer,
         startOff: Int,
@@ -218,7 +279,8 @@ object DexAndApkDisassembler {
         methodLookup: (Int) -> String,
         fieldLookup: (Int) -> String,
         outReport: StringBuilder,
-        outSummaries: MutableList<String>
+        outSummaries: MutableList<String>,
+        outXrefs: MutableList<String>
     ) {
         val pos = intArrayOf(startOff)
         val staticFields = readUleb128(bytes, pos)
@@ -227,27 +289,27 @@ object DexAndApkDisassembler {
         val virtualMethods = readUleb128(bytes, pos)
 
         var fieldIdx = 0
-        repeat((staticFields + instanceFields).coerceAtMost(200)) {
+        repeat((staticFields + instanceFields).coerceAtMost(300)) {
             if (pos[0] >= bytes.size) return
             fieldIdx += readUleb128(bytes, pos)
-            readUleb128(bytes, pos) // accessFlags
+            readUleb128(bytes, pos)
         }
 
         var directIdx = 0
         var virtualIdx = 0
         val methodsToDecode = mutableListOf<Pair<Int, Int>>()
 
-        repeat(directMethods.coerceAtMost(200)) {
+        repeat(directMethods.coerceAtMost(300)) {
             if (pos[0] >= bytes.size) return
             directIdx += readUleb128(bytes, pos)
-            readUleb128(bytes, pos) // accessFlags
+            readUleb128(bytes, pos)
             val codeOff = readUleb128(bytes, pos)
             methodsToDecode += directIdx to codeOff
         }
-        repeat(virtualMethods.coerceAtMost(200)) {
+        repeat(virtualMethods.coerceAtMost(300)) {
             if (pos[0] >= bytes.size) return
             virtualIdx += readUleb128(bytes, pos)
-            readUleb128(bytes, pos) // accessFlags
+            readUleb128(bytes, pos)
             val codeOff = readUleb128(bytes, pos)
             methodsToDecode += virtualIdx to codeOff
         }
@@ -257,32 +319,56 @@ object DexAndApkDisassembler {
             val sig = methodLookup(mIdx)
             val mShort = sig.substringAfter("->")
             outSummaries += sig
-            if (codeOff <= 0 || codeOff + 16 > bytes.size || decodedMethods >= 8) {
+            if (codeOff <= 0 || codeOff + 16 > bytes.size || decodedMethods >= 24) {
                 outReport.appendLine("  .method $mShort")
                 continue
             }
             val interestingMethod = FOD_CLASS_KEYWORDS.any { mShort.contains(it, true) } ||
-                mShort.contains("on", true) || mShort.contains("set", true) || mShort.contains("show", true)
+                mShort.contains("on", true) || mShort.contains("set", true) ||
+                mShort.contains("show", true) || mShort.contains("hide", true) ||
+                mShort.contains("update", true) || mShort.contains("handle", true)
             if (!interestingMethod) {
                 outReport.appendLine("  .method $mShort")
                 continue
             }
 
             decodedMethods++
-            val insnsSize = buf.getInt(codeOff + 12).coerceIn(0, 128)
+            val insnsSize = buf.getInt(codeOff + 12).coerceIn(0, 240)
             val insnsStart = codeOff + 16
             outReport.appendLine("  .method $mShort (insns=$insnsSize)")
+
+            val callees = linkedSetOf<String>()
+            val literalStrings = linkedSetOf<String>()
 
             var pc = 0
             while (pc < insnsSize && insnsStart + (pc + 1) * 2 <= bytes.size) {
                 val unit0 = buf.getShort(insnsStart + pc * 2).toInt() and 0xFFFF
                 val op = unit0 and 0xFF
                 val step = dalvikInsnWidth(op)
-                val line = decodeDalvikInsn(op, unit0, insnsStart, pc, buf, strings, methodLookup, fieldLookup)
+                val line = decodeDalvikInsn(
+                    op = op,
+                    unit0 = unit0,
+                    insnsStart = insnsStart,
+                    pc = pc,
+                    buf = buf,
+                    strings = strings,
+                    methodLookup = methodLookup,
+                    fieldLookup = fieldLookup,
+                    outCallees = callees,
+                    outStrings = literalStrings
+                )
                 if (line != null) {
                     outReport.appendLine("    0x${pc.toString(16).padStart(4, '0')}: $line")
                 }
                 pc += step.coerceAtLeast(1)
+            }
+
+            if (callees.isNotEmpty() || literalStrings.isNotEmpty()) {
+                val parts = buildList {
+                    if (callees.isNotEmpty()) add("invokes=[${callees.take(8).joinToString(", ")}]")
+                    if (literalStrings.isNotEmpty()) add("strings=[${literalStrings.take(5).joinToString(", ") { "\"$it\"" }}]")
+                }
+                outXrefs += "${className.substringAfterLast('.')}->$mShort -> ${parts.joinToString(" | ")}"
             }
         }
     }
@@ -295,7 +381,9 @@ object DexAndApkDisassembler {
         buf: ByteBuffer,
         strings: Array<String>,
         methodLookup: (Int) -> String,
-        fieldLookup: (Int) -> String
+        fieldLookup: (Int) -> String,
+        outCallees: MutableSet<String>,
+        outStrings: MutableSet<String>
     ): String? {
         fun u16(offset: Int): Int {
             val pos = insnsStart + (pc + offset) * 2
@@ -304,14 +392,18 @@ object DexAndApkDisassembler {
         return when (op) {
             0x0E -> "return-void"
             0x0F, 0x10, 0x11 -> "return v${(unit0 ushr 8) and 0xFF}"
-            0x1A -> { // const-string vAA, string@BBBB
+            0x1A -> {
                 val sIdx = u16(1)
-                "const-string v${(unit0 ushr 8) and 0xFF}, \"${strings.getOrElse(sIdx) { "?" }.take(100)}\""
+                val s = strings.getOrElse(sIdx) { "?" }.take(120)
+                if (s != "?" && s.length >= 3) outStrings += s
+                "const-string v${(unit0 ushr 8) and 0xFF}, \"$s\""
             }
-            0x1B -> { // const-string/jumbo
+            0x1B -> {
                 val pos = insnsStart + (pc + 1) * 2
                 val sIdx = if (pos + 4 <= buf.limit()) buf.getInt(pos) else 0
-                "const-string/jumbo \"${strings.getOrElse(sIdx) { "?" }.take(100)}\""
+                val s = strings.getOrElse(sIdx) { "?" }.take(120)
+                if (s != "?" && s.length >= 3) outStrings += s
+                "const-string/jumbo \"$s\""
             }
             in 0x52..0x5F -> {
                 val fIdx = u16(1)
@@ -323,16 +415,18 @@ object DexAndApkDisassembler {
                 val opName = if (op <= 0x66) "sget" else "sput"
                 "$opName ${fieldLookup(fIdx)}"
             }
-            0x6E, 0x6F, 0x70, 0x71, 0x72 -> {
+            0x6E, 0x6F, 0x70, 0x71, 0x72, 0x74, 0x75, 0x76, 0x77, 0x78 -> {
                 val mIdx = u16(1)
+                val resolved = methodLookup(mIdx)
+                outCallees += resolved
                 val name = when (op) {
-                    0x6E -> "invoke-virtual"
-                    0x6F -> "invoke-super"
-                    0x70 -> "invoke-direct"
-                    0x71 -> "invoke-static"
+                    0x6E, 0x74 -> "invoke-virtual"
+                    0x6F, 0x75 -> "invoke-super"
+                    0x70, 0x76 -> "invoke-direct"
+                    0x71, 0x77 -> "invoke-static"
                     else -> "invoke-interface"
                 }
-                "$name ${methodLookup(mIdx)}"
+                "$name $resolved"
             }
             in 0x32..0x3D -> "if-cond +${u16(1).toShort()}"
             else -> null
@@ -350,7 +444,7 @@ object DexAndApkDisassembler {
     private fun readMutf8String(bytes: ByteArray, dataOff: Int): String {
         if (dataOff !in 0 until bytes.size) return ""
         val pos = intArrayOf(dataOff)
-        readUleb128(bytes, pos) // utf16 length
+        readUleb128(bytes, pos)
         val start = pos[0]
         var end = start
         while (end < bytes.size && bytes[end] != 0.toByte() && end - start < 240) {
@@ -390,7 +484,7 @@ object DexAndApkDisassembler {
         for (bRaw in bytes) {
             val b = bRaw.toInt() and 0xFF
             if (b in 0x20..0x7E) {
-                if (sb.length < 160) sb.append(b.toChar())
+                if (sb.length < 180) sb.append(b.toChar())
             } else {
                 if (sb.length >= 5) {
                     val s = sb.toString()

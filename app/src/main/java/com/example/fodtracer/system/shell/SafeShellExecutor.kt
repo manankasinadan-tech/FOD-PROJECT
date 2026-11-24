@@ -126,10 +126,10 @@ class SafeShellExecutor(
     suspend fun readBinaryBytes(
         path: SafeSystemPath,
         useRoot: Boolean,
-        maxBytes: Int = 2_097_152,
-        timeoutMs: Long = 4_500L
+        maxBytes: Int = 4_194_304,
+        timeoutMs: Long = 5_500L
     ): ByteArray? = withContext(Dispatchers.IO) {
-        val boundedCap = maxBytes.coerceIn(1024, 6_291_456)
+        val boundedCap = maxBytes.coerceIn(1024, 12_582_912)
         // 1. Direct read-only file access (fast, zero process spawn)
         val direct = runCatching {
             val file = File(path.value)
@@ -307,6 +307,10 @@ class SafeShellExecutor(
         ShellCommandSpec.LshalList -> listOf("lshal", "--neat")
         is ShellCommandSpec.CmdOverlayList -> listOf("cmd", "overlay", "list", "--user", spec.userId.toString())
         is ShellCommandSpec.ReadSystemFile -> listOf("cat", spec.path.value)
+        is ShellCommandSpec.ReadSystemHead -> {
+            val boundedLines = spec.lines.coerceIn(1, 1200)
+            listOf("head", "-n", boundedLines.toString(), spec.path.value)
+        }
         is ShellCommandSpec.ListSystemDir -> {
             val boundedDepth = spec.maxDepth.coerceIn(1, 4)
             listOf("find", spec.path.value, "-maxdepth", boundedDepth.toString())
@@ -341,6 +345,9 @@ class SafeShellExecutor(
                 AllowedProcTarget.MAPS -> listOf("cat", "/proc/${spec.pid}/maps")
                 AllowedProcTarget.CMDLINE -> listOf("cat", "/proc/${spec.pid}/cmdline")
                 AllowedProcTarget.STATUS -> listOf("cat", "/proc/${spec.pid}/status")
+                AllowedProcTarget.STACK -> listOf("cat", "/proc/${spec.pid}/stack")
+                AllowedProcTarget.WCHAN -> listOf("cat", "/proc/${spec.pid}/wchan")
+                AllowedProcTarget.SYSCALL -> listOf("cat", "/proc/${spec.pid}/syscall")
             }
         }
     }

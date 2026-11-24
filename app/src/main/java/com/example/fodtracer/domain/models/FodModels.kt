@@ -284,6 +284,15 @@ data class EvidenceRecord(
 )
 
 @Serializable
+data class CodeCallRef(
+    val artifactPath: String,
+    val symbolOrMethod: String,
+    val callerChain: List<String> = emptyList(),
+    val targetResource: String? = null,
+    val detail: String? = null
+)
+
+@Serializable
 data class TimelineEvent(
     val id: String,
     val type: TimelineEventType,
@@ -295,7 +304,9 @@ data class TimelineEvent(
     val evidenceId: String,
     val confidence: ConfidenceLevel,
     val observationType: ObservationType,
-    val relatedEventIds: List<String> = emptyList()
+    val relatedEventIds: List<String> = emptyList(),
+    val codeRefs: List<CodeCallRef> = emptyList(),
+    val procStateNote: String? = null
 )
 
 @Serializable
@@ -403,7 +414,9 @@ data class DisassembledArtifact(
     val extractedStrings: List<String> = emptyList(),
     val disassemblySnippet: String = "",
     val epistemicLevel: EpistemicLevel = EpistemicLevel.PROVED,
-    val rawFileName: String? = null
+    val rawFileName: String? = null,
+    val crossReferences: List<String> = emptyList(),
+    val decodedResources: List<String> = emptyList()
 )
 
 @Serializable
@@ -412,7 +425,10 @@ data class ProcessRuntimeSnapshot(
     val pid: Int,
     val openFodDescriptors: List<String> = emptyList(),
     val loadedFodLibraries: List<String> = emptyList(),
-    val epistemicLevel: EpistemicLevel = EpistemicLevel.PROVED
+    val epistemicLevel: EpistemicLevel = EpistemicLevel.PROVED,
+    val kernelStack: List<String> = emptyList(),
+    val wchan: String? = null,
+    val syscall: String? = null
 )
 
 @Serializable
@@ -442,7 +458,10 @@ data class LiveTraceData(
     val rawBufferTruncated: Boolean = false,
     val runtimeSnapshots: List<ProcessRuntimeSnapshot> = emptyList(),
     val surfaceFlingerSnapshot: String? = null,
-    val dumpsysFingerprintDelta: String? = null
+    val dumpsysFingerprintDelta: String? = null,
+    val binderTransactions: List<String> = emptyList(),
+    val tracefsEvents: List<String> = emptyList(),
+    val dumpsysDiffs: List<String> = emptyList()
 )
 
 @Serializable

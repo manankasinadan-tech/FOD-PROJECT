@@ -106,18 +106,6 @@ class FinalizeLiveTraceUseCase(
         liveEvidence: List<EvidenceRecord>
     ): DiagnosticSession {
         val mergedEvidence = (baseSession.evidence + liveEvidence).distinctBy { it.id }
-        val correlationOut = correlationEngine.correlate(
-            components = baseSession.components,
-            evidence = mergedEvidence,
-            liveTrace = liveTrace
-        )
-        val anomalyOut = anomalyEngine.analyze(
-            environment = baseSession.environment,
-            probeResults = baseSession.probeResults,
-            components = baseSession.components,
-            evidence = mergedEvidence,
-            liveTrace = liveTrace
-        )
 
         val allowRoot = baseSession.environment.rootState == RootState.GRANTED_VERIFIED
         val deepOut = deepArtifactEngine.inspectAll(
@@ -132,16 +120,37 @@ class FinalizeLiveTraceUseCase(
         val mergedRaw = baseSession.rawArtifacts.toMutableMap().apply {
             putAll(deepOut.rawFiles)
         }
+
+        // Correlate every live runtime event directly to exact disassembled symbols, call chains & /proc/<pid> states
+        val enrichedEvents = com.example.fodtracer.core.disasm.CodeRuntimeCorrelator.correlateTimelineEvents(
+            events = liveTrace.events,
+            artifacts = mergedArtifacts,
+            runtimeSnapshots = liveTrace.runtimeSnapshots
+        )
+        val enrichedLiveTrace = liveTrace.copy(events = enrichedEvents)
+
+        val correlationOut = correlationEngine.correlate(
+            components = baseSession.components,
+            evidence = mergedEvidence,
+            liveTrace = enrichedLiveTrace
+        )
+        val anomalyOut = anomalyEngine.analyze(
+            environment = baseSession.environment,
+            probeResults = baseSession.probeResults,
+            components = baseSession.components,
+            evidence = mergedEvidence,
+            liveTrace = enrichedLiveTrace
+        )
         val mechanismSteps = FodLogicReconstructor.reconstruct(
             probeResults = baseSession.probeResults,
             artifacts = mergedArtifacts,
-            liveTrace = liveTrace
+            liveTrace = enrichedLiveTrace
         )
 
         val updated = baseSession.copy(
             updatedAtCivilMs = System.currentTimeMillis(),
             evidence = mergedEvidence,
-            liveTrace = liveTrace,
+            liveTrace = enrichedLiveTrace,
             dependencies = correlationOut.dependencyLinks,
             correlations = correlationOut.correlations,
             anomalies = anomalyOut.anomalies,

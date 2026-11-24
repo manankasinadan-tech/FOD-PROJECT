@@ -40,6 +40,7 @@ class ArchiveManager(
     fun persistStructuredSessionDir(session: DiagnosticSession) {
         val roots = listOfNotNull(privateRootDir(), publicRootDirIfWritable())
         val filesMap = buildStructuredFileMap(session)
+        val markdown = MarkdownReportExporter.generateMarkdown(session)
         roots.forEach { root ->
             runCatching {
                 val diagDir = File(File(root, "diagnostics"), session.sessionId)
@@ -49,6 +50,10 @@ class ArchiveManager(
                     outFile.parentFile?.mkdirs()
                     outFile.writeText(content, StandardCharsets.UTF_8)
                 }
+                // Auto-save full standalone .md report inside session dir and exports dir
+                File(diagDir, "${session.sessionId}.md").writeText(markdown, StandardCharsets.UTF_8)
+                val exportsDir = File(root, "exports").apply { mkdirs() }
+                File(exportsDir, "${session.sessionId}.md").writeText(markdown, StandardCharsets.UTF_8)
             }
         }
     }
@@ -93,6 +98,33 @@ class ArchiveManager(
         }
     }
 
+    override suspend fun exportDiagnosticMarkdown(
+        session: DiagnosticSession,
+        anonymize: Boolean,
+        destinationUri: Uri?
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val exportSession = if (anonymize) ReportAnonymizer.anonymize(session) else session
+            val markdown = MarkdownReportExporter.generateMarkdown(exportSession)
+            val fileName = "${exportSession.sessionId}${if (anonymize) "_anon" else ""}.md"
+
+            if (destinationUri != null) {
+                context.contentResolver.openOutputStream(destinationUri)?.use { out ->
+                    out.write(markdown.toByteArray(StandardCharsets.UTF_8))
+                    out.flush()
+                } ?: throw IOException("Unable to open SAF destination stream.")
+                return@runCatching "SAF:$fileName"
+            }
+
+            val targetDir = publicRootDirIfWritable()?.let { File(it, "exports") }
+                ?: File(privateRootDir(), "exports")
+            targetDir.mkdirs()
+            val targetFile = File(targetDir, fileName)
+            targetFile.writeText(markdown, StandardCharsets.UTF_8)
+            targetFile.absolutePath
+        }
+    }
+
     override suspend fun importDiagnosticZip(sourceUri: Uri): Result<DiagnosticSession> = withContext(Dispatchers.IO) {
         runCatching {
             context.contentResolver.openInputStream(sourceUri)?.use { input ->
@@ -107,9 +139,9 @@ class ArchiveManager(
             File(privateRootDir(), "exports")
         )
         dirs.flatMap { dir ->
-            dir.listFiles { file -> file.isFile && file.name.endsWith(".zip", ignoreCase = true) }
-                ?.map { it.absolutePath }
-                .orEmpty()
+            dir.listFiles { file ->
+                file.isFile && (file.name.endsWith(".zip", ignoreCase = true) || file.name.endsWith(".md", ignoreCase = true))
+            }?.map { it.absolutePath }.orEmpty()
         }.distinct()
     }
 

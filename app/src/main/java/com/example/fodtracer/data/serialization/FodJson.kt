@@ -57,8 +57,15 @@ object ReportAnonymizer {
         val redactedLive = session.liveTrace?.copy(
             events = session.liveTrace.events.map { evt ->
                 evt.copy(data = redactString(evt.data))
-            }
+            },
+            binderTransactions = session.liveTrace.binderTransactions.map { redactString(it) },
+            tracefsEvents = session.liveTrace.tracefsEvents.map { redactString(it) },
+            dumpsysDiffs = session.liveTrace.dumpsysDiffs.map { redactString(it) },
+            surfaceFlingerSnapshot = session.liveTrace.surfaceFlingerSnapshot?.let { redactString(it) },
+            dumpsysFingerprintDelta = session.liveTrace.dumpsysFingerprintDelta?.let { redactString(it) }
         )
+
+        val redactedRaw = session.rawArtifacts.mapValues { (_, v) -> redactString(v) }
 
         return session.copy(
             sessionId = redactedSessionId,
@@ -66,6 +73,7 @@ object ReportAnonymizer {
             probeResults = redactedProbes,
             evidence = redactedEvidence,
             liveTrace = redactedLive,
+            rawArtifacts = redactedRaw,
             isAnonymized = true
         )
     }

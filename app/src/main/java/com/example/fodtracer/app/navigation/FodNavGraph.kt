@@ -123,6 +123,7 @@ fun FodTracerApp(container: AppContainer) {
                         onRequestAiConsent = diagnosticVm::requestAiAnalysisConsent,
                         onDismissAiConsent = diagnosticVm::dismissAiConsent,
                         onConfirmAiAnalysis = diagnosticVm::confirmAndRunAiAnalysis,
+                        onExportMarkdown = { uri -> diagnosticVm.exportMarkdown(destinationUri = uri) },
                         onClearStatusMessage = diagnosticVm::clearStatusMessage
                     )
                 }
@@ -194,6 +195,7 @@ fun FodTracerApp(container: AppContainer) {
                         feedbackMessage = feedbackMessage,
                         onBack = { navController.popBackStack() },
                         onExportSession = archivesVm::exportSession,
+                        onExportMarkdown = archivesVm::exportSessionMarkdown,
                         onImportZip = { uri ->
                             archivesVm.importZipFromUri(uri) {
                                 navController.navigate(DiagnosticRoute)

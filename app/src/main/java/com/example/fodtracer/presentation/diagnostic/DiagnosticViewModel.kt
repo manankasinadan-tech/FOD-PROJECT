@@ -1,12 +1,15 @@
 package com.example.fodtracer.presentation.diagnostic
 
 import android.content.Intent
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.fodtracer.core.probe.ProbeExecutionProgress
 import com.example.fodtracer.domain.interfaces.AiAdvisorService
+import com.example.fodtracer.domain.interfaces.ArchiveRepository
 import com.example.fodtracer.domain.interfaces.DiagnosticRepository
+import com.example.fodtracer.domain.interfaces.PreferencesRepository
 import com.example.fodtracer.domain.interfaces.PrivilegeManager
 import com.example.fodtracer.domain.models.DiagnosticSession
 import com.example.fodtracer.domain.models.ProbeDomain
@@ -52,6 +55,8 @@ class DiagnosticViewModel(
     private val runColdDiagnosticUseCase: RunColdDiagnosticUseCase,
     private val finalizeLiveTraceUseCase: FinalizeLiveTraceUseCase,
     private val repository: DiagnosticRepository,
+    private val archiveRepository: ArchiveRepository,
+    private val preferencesRepository: PreferencesRepository,
     private val liveTraceCoordinator: LiveTraceCoordinator,
     private val biometricInspector: AndroidBiometricInspector,
     private val privilegeManager: PrivilegeManager,
@@ -76,6 +81,8 @@ class DiagnosticViewModel(
 
     val activeSession: StateFlow<DiagnosticSession?> = repository.activeSession
     val liveProgress: StateFlow<LiveTraceProgress> = liveTraceCoordinator.progress
+    val anonymizeByDefault: StateFlow<Boolean> = preferencesRepository.anonymizeByDefault
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
     val isFirebaseAiAvailable: Boolean get() = aiAdvisorService.isFirebaseConfigured()
 
     init {
@@ -108,6 +115,7 @@ class DiagnosticViewModel(
                     } else {
                         _coldState.value = ColdRunUiState.Completed(session.sessionId)
                         _selectedSection.value = DashboardSection.OVERVIEW
+                        _statusMessage.value = "MD auto-saved: ${session.sessionId}.md"
                     }
                 }
             } catch (e: CancellationException) {
@@ -139,13 +147,27 @@ class DiagnosticViewModel(
                 val (liveData, liveEvidence) = liveTraceCoordinator.finishAndCollect()
                 FodLiveTracerService.stop(appContext)
                 val base = activeSession.value ?: return@launch
-                finalizeLiveTraceUseCase(base, liveData, liveEvidence)
+                val updated = finalizeLiveTraceUseCase(base, liveData, liveEvidence)
                 _selectedSection.value = DashboardSection.DISASSEMBLY
+                _statusMessage.value = "Live correlated & MD updated: ${updated.sessionId}.md"
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 _statusMessage.value = e.localizedMessage ?: "Failed to finalize live trace."
             }
+        }
+    }
+
+    fun exportMarkdown(anonymize: Boolean = anonymizeByDefault.value, destinationUri: Uri? = null) {
+        val session = activeSession.value ?: return
+        viewModelScope.launch {
+            archiveRepository.exportDiagnosticMarkdown(session, anonymize, destinationUri)
+                .onSuccess { path ->
+                    _statusMessage.value = "Exported MD: $path"
+                }
+                .onFailure { err ->
+                    _statusMessage.value = "MD export failed: ${err.localizedMessage}"
+                }
         }
     }
 
@@ -184,6 +206,8 @@ class DiagnosticViewModel(
                 runColdDiagnosticUseCase = container.runColdDiagnosticUseCase,
                 finalizeLiveTraceUseCase = container.finalizeLiveTraceUseCase,
                 repository = container.diagnosticRepository,
+                archiveRepository = container.archiveRepository,
+                preferencesRepository = container.preferencesRepository,
                 liveTraceCoordinator = container.liveTraceCoordinator,
                 biometricInspector = container.biometricInspector,
                 privilegeManager = container.privilegeManager,

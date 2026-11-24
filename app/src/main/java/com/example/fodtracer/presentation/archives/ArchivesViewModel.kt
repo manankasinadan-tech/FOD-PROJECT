@@ -56,6 +56,19 @@ class ArchivesViewModel(
         }
     }
 
+    fun exportSessionMarkdown(session: DiagnosticSession, anonymize: Boolean, destinationUri: Uri? = null) {
+        viewModelScope.launch {
+            archiveRepository.exportDiagnosticMarkdown(session, anonymize, destinationUri)
+                .onSuccess { path ->
+                    _feedbackMessage.value = "Exported MD: $path"
+                    refreshPublicArchives()
+                }
+                .onFailure { err ->
+                    _feedbackMessage.value = "MD export failed: ${err.localizedMessage}"
+                }
+        }
+    }
+
     fun importZipFromUri(uri: Uri, onImported: () -> Unit) {
         viewModelScope.launch {
             archiveRepository.importDiagnosticZip(uri)

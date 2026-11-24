@@ -65,6 +65,10 @@ sealed interface ShellCommandSpec {
         override val displayName: String = "cat ${path.value}"
     }
 
+    data class ReadSystemHead(val path: SafeSystemPath, val lines: Int = 220) : ShellCommandSpec {
+        override val displayName: String = "head -n $lines ${path.value}"
+    }
+
     data class ListSystemDir(val path: SafeSystemPath, val maxDepth: Int = 2) : ShellCommandSpec {
         override val displayName: String = "find_bounded ${path.value}"
     }
@@ -101,7 +105,10 @@ enum class AllowedProcTarget(val cliName: String) {
     FD("fd"),
     MAPS("maps"),
     CMDLINE("cmdline"),
-    STATUS("status")
+    STATUS("status"),
+    STACK("stack"),
+    WCHAN("wchan"),
+    SYSCALL("syscall")
 }
 
 enum class AllowedDumpsysService(val cliName: String) {
@@ -203,6 +210,12 @@ interface DiagnosticRepository {
 
 interface ArchiveRepository {
     suspend fun exportDiagnosticZip(
+        session: DiagnosticSession,
+        anonymize: Boolean,
+        destinationUri: Uri? = null
+    ): Result<String>
+
+    suspend fun exportDiagnosticMarkdown(
         session: DiagnosticSession,
         anonymize: Boolean,
         destinationUri: Uri? = null
