@@ -11,6 +11,14 @@
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
 
+    <queries>
+        <package android:name="com.topjohnwu.magisk" />
+        <package android:name="io.github.vvb2060.magisk" />
+        <package android:name="me.weishu.kernelsu" />
+        <package android:name="com.rifsxd.ksunext" />
+        <package android:name="me.bmax.apatch" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

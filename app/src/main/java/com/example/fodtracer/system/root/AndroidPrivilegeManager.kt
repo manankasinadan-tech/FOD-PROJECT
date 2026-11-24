@@ -24,6 +24,10 @@ class AndroidPrivilegeManager(
     private val seLinuxInspector: SeLinuxInspector
 ) : PrivilegeManager {
 
+    private val privPrefs by lazy {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
     private val _snapshot = MutableStateFlow(
         PrivilegeSnapshot(
             suBinaryFound = false,
@@ -36,7 +40,8 @@ class AndroidPrivilegeManager(
             manageExternalStorageGranted = false,
             postNotificationsGranted = false,
             publicFodDirPath = PUBLIC_FOD_DIR_PATH,
-            publicFodDirWritable = false
+            publicFodDirWritable = false,
+            rootDiagnosticNote = null
         )
     )
     override val snapshot: StateFlow<PrivilegeSnapshot> = _snapshot.asStateFlow()
@@ -44,17 +49,28 @@ class AndroidPrivilegeManager(
     override suspend fun refreshStatus(): PrivilegeSnapshot = withContext(Dispatchers.IO) {
         val suPath = SafeShellExecutor.findDefaultSuBinary()
         val providerHint = detectRootProviderHint()
-        val seLinuxInfo = seLinuxInspector.inspect(useRoot = false)
+        val previouslyVerified = privPrefs.getBoolean(KEY_ROOT_VERIFIED, false)
+
+        // If user already verified root in this app earlier (or manager already granted su silently),
+        // verify silently on refresh so Root stays active across app restarts.
+        if (previouslyVerified && _snapshot.value.rootState != RootState.GRANTED_VERIFIED) {
+            val silentCheck = shellExecutor.execute(ShellCommandSpec.IdCommand, useRoot = true, timeoutMs = 2_500L)
+            if (silentCheck.exitCode == 0 && silentCheck.stdout.contains("uid=0")) {
+                return@withContext finalizeVerifiedRoot(suPath ?: "su", providerHint, silentCheck)
+            }
+        }
+
+        val seLinuxInfo = seLinuxInspector.inspect(useRoot = _snapshot.value.rootState == RootState.GRANTED_VERIFIED)
         val storageGranted = isManageExternalStorageGranted()
         val notifGranted = isPostNotificationsGranted()
         val publicWritable = checkPublicDirWritable(storageGranted)
 
         val currentRootState = _snapshot.value.rootState
         val resolvedRootState = when {
-            suPath == null && providerHint == null -> RootState.NOT_AVAILABLE
             currentRootState == RootState.GRANTED_VERIFIED -> RootState.GRANTED_VERIFIED
             currentRootState == RootState.DENIED -> RootState.DENIED
-            else -> RootState.AVAILABLE_NOT_GRANTED
+            suPath != null || providerHint != null -> RootState.AVAILABLE_NOT_GRANTED
+            else -> RootState.NOT_AVAILABLE
         }
 
         val updated = PrivilegeSnapshot(
@@ -68,60 +84,136 @@ class AndroidPrivilegeManager(
             manageExternalStorageGranted = storageGranted,
             postNotificationsGranted = notifGranted,
             publicFodDirPath = PUBLIC_FOD_DIR_PATH,
-            publicFodDirWritable = publicWritable
+            publicFodDirWritable = publicWritable,
+            rootDiagnosticNote = _snapshot.value.rootDiagnosticNote
         )
         _snapshot.value = updated
         updated
     }
 
     override suspend fun requestAndVerifyRoot(): PrivilegeSnapshot = withContext(Dispatchers.IO) {
-        val suPath = SafeShellExecutor.findDefaultSuBinary()
+        val discoveredSu = SafeShellExecutor.findDefaultSuBinary()
         val providerHint = detectRootProviderHint()
 
-        if (suPath == null) {
-            val noSuSnapshot = refreshStatus().copy(
-                suBinaryFound = false,
-                rootState = RootState.NOT_AVAILABLE,
-                rootUidInfo = null
-            )
-            _snapshot.value = noSuSnapshot
-            return@withContext noSuSnapshot
+        // Always attempt real su execution even if File.exists() returned false (KernelSU / APatch / Zygisk namespace hiding)
+        val attempts = buildList {
+            if (discoveredSu != null) add(discoveredSu)
+            add("su")
+            SafeShellExecutor.SU_CANDIDATE_PATHS.forEach { path ->
+                if (path != discoveredSu) add(path)
+            }
+        }.distinct()
+
+        var verifiedPath: String? = null
+        var lastIdResult: ShellExecutionResult? = null
+
+        val safeExec = shellExecutor as? SafeShellExecutor
+        for ((index, candidate) in attempts.withIndex()) {
+            val timeout = if (index <= 1) 15_000L else 2_500L
+            val idRes = if (safeExec != null && candidate != discoveredSu && candidate != "su") {
+                safeExec.executeWithExplicitSu(ShellCommandSpec.IdCommand, candidate, timeoutMs = timeout)
+            } else {
+                shellExecutor.execute(ShellCommandSpec.IdCommand, useRoot = true, timeoutMs = timeout)
+            }
+            lastIdResult = idRes
+            if (idRes.exitCode == 0 && idRes.stdout.contains("uid=0")) {
+                verifiedPath = candidate
+                break
+            }
+            // If user explicitly denied the prompt (not a missing-binary ENOENT error), stop retrying other paths
+            val errLower = idRes.stderr.lowercase()
+            if (idRes.denied && !errLower.contains("no such file") && !errLower.contains("cannot run program")) {
+                break
+            }
         }
 
-        val idResult = shellExecutor.execute(ShellCommandSpec.IdCommand, useRoot = true, timeoutMs = 6_000L)
-        val hasUidZero = idResult.exitCode == 0 && idResult.stdout.contains("uid=0")
+        if (verifiedPath != null && lastIdResult != null) {
+            // Confirm real kernel read capability
+            val procVersionPath = SafeSystemPath.parse("/proc/version")
+            val readVerify = if (procVersionPath != null) {
+                if (safeExec != null && verifiedPath != discoveredSu && verifiedPath != "su") {
+                    safeExec.executeWithExplicitSu(ShellCommandSpec.ReadSystemFile(procVersionPath), verifiedPath, timeoutMs = 4_000L)
+                } else {
+                    shellExecutor.execute(ShellCommandSpec.ReadSystemFile(procVersionPath), useRoot = true, timeoutMs = 4_000L)
+                }
+            } else null
 
-        // Real read verification on a kernel/proc node in addition to `id`
-        val procVersionPath = SafeSystemPath.parse("/proc/version")
-        val readVerify = if (hasUidZero && procVersionPath != null) {
-            shellExecutor.execute(ShellCommandSpec.ReadSystemFile(procVersionPath), useRoot = true, timeoutMs = 3_000L)
-        } else null
-
-        val verified = hasUidZero && (readVerify?.exitCode == 0)
-        val rootState = when {
-            verified -> RootState.GRANTED_VERIFIED
-            idResult.denied || idResult.exitCode != 0 -> RootState.DENIED
-            else -> RootState.DENIED
+            if (readVerify == null || readVerify.exitCode == 0) {
+                return@withContext finalizeVerifiedRoot(verifiedPath, providerHint, lastIdResult)
+            }
         }
 
-        val seLinuxInfo = seLinuxInspector.inspect(useRoot = verified)
+        privPrefs.edit().putBoolean(KEY_ROOT_VERIFIED, false).apply()
+
+        val errReason = lastIdResult?.stderr?.ifBlank { "exit=${lastIdResult.exitCode}" } ?: "su execution unavailable"
+        val note = when {
+            providerHint?.contains("KernelSU", ignoreCase = true) == true ->
+                "KernelSU detected: open KernelSU Manager -> Superuser -> enable FodTracer explicitly ($errReason)."
+            providerHint?.contains("APatch", ignoreCase = true) == true ->
+                "APatch detected: authorize FodTracer in APatch Superuser list ($errReason)."
+            providerHint?.contains("Magisk", ignoreCase = true) == true ->
+                "Magisk detected: ensure FodTracer is granted Superuser and NOT in DenyList ($errReason)."
+            else -> "su attempt failed: $errReason"
+        }
+
+        val finalRootState = if (lastIdResult?.denied == true || providerHint != null || discoveredSu != null) {
+            RootState.DENIED
+        } else {
+            RootState.NOT_AVAILABLE
+        }
+
+        val seLinuxInfo = seLinuxInspector.inspect(useRoot = false)
         val storageGranted = isManageExternalStorageGranted()
-
         val updated = PrivilegeSnapshot(
-            suBinaryFound = true,
-            suBinaryPath = suPath,
-            rootState = rootState,
+            suBinaryFound = discoveredSu != null,
+            suBinaryPath = discoveredSu,
+            rootState = finalRootState,
             rootProviderHint = providerHint,
-            rootUidInfo = if (verified) idResult.stdout.trim().lineSequence().firstOrNull() else null,
+            rootUidInfo = null,
             seLinuxMode = seLinuxInfo.mode,
             seLinuxContext = seLinuxInfo.context,
             manageExternalStorageGranted = storageGranted,
             postNotificationsGranted = isPostNotificationsGranted(),
             publicFodDirPath = PUBLIC_FOD_DIR_PATH,
-            publicFodDirWritable = checkPublicDirWritable(storageGranted)
+            publicFodDirWritable = checkPublicDirWritable(storageGranted),
+            rootDiagnosticNote = note
         )
         _snapshot.value = updated
         updated
+    }
+
+    private suspend fun finalizeVerifiedRoot(
+        verifiedSuPath: String,
+        initialProviderHint: String?,
+        idResult: ShellExecutionResult
+    ): PrivilegeSnapshot {
+        privPrefs.edit().putBoolean(KEY_ROOT_VERIFIED, true).apply()
+        val seLinuxInfo = seLinuxInspector.inspect(useRoot = true)
+        val storageGranted = isManageExternalStorageGranted()
+        val resolvedProvider = initialProviderHint ?: when {
+            verifiedSuPath.contains("ksu", true) -> "KernelSU"
+            verifiedSuPath.contains("/ap/", true) -> "APatch"
+            verifiedSuPath.contains("magisk", true) -> "Magisk"
+            idResult.stdout.contains("magisk", true) -> "Magisk"
+            else -> "Root (su)"
+        }
+
+        val updated = PrivilegeSnapshot(
+            suBinaryFound = true,
+            suBinaryPath = verifiedSuPath,
+            rootState = RootState.GRANTED_VERIFIED,
+            rootProviderHint = resolvedProvider,
+            rootUidInfo = idResult.stdout.trim().lineSequence().firstOrNull(),
+            seLinuxMode = seLinuxInfo.mode,
+            seLinuxContext = seLinuxInfo.context,
+            manageExternalStorageGranted = storageGranted,
+            postNotificationsGranted = isPostNotificationsGranted(),
+            publicFodDirPath = PUBLIC_FOD_DIR_PATH,
+            publicFodDirWritable = checkPublicDirWritable(storageGranted),
+            rootDiagnosticNote = "Verified via $verifiedSuPath"
+        )
+        _snapshot.value = updated
+        return updated
     }
 
     private fun detectRootProviderHint(): String? {
@@ -130,6 +222,7 @@ class AndroidPrivilegeManager(
             "com.topjohnwu.magisk" to "Magisk",
             "io.github.vvb2060.magisk" to "Magisk Alpha",
             "me.weishu.kernelsu" to "KernelSU",
+            "com.rifsxd.ksunext" to "KernelSU Next",
             "me.bmax.apatch" to "APatch"
         )
         for ((pkg, label) in knownManagers) {
@@ -183,6 +276,9 @@ class AndroidPrivilegeManager(
     }
 
     companion object {
+        private const val PREFS_NAME = "fodtracer_priv"
+        private const val KEY_ROOT_VERIFIED = "root_previously_verified"
+
         val PUBLIC_FOD_DIR_PATH: String =
             File(Environment.getExternalStorageDirectory(), "FODtracer").absolutePath
     }

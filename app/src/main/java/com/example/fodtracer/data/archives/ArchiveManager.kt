@@ -132,10 +132,17 @@ class ArchiveManager(
         map["anomalies.json"] = FodJson.codec.encodeToString(session.anomalies)
         map["hypotheses.json"] = FodJson.codec.encodeToString(session.hypotheses)
         map["solutions.json"] = FodJson.codec.encodeToString(session.solutions)
+        map["disassembly.json"] = FodJson.codec.encodeToString(session.disassembledArtifacts)
+        map["mechanism.json"] = FodJson.codec.encodeToString(session.mechanismSteps)
         map["session.json"] = FodJson.codec.encodeToString(session)
         session.rawArtifacts.forEach { (rawName, rawContent) ->
-            val sanitized = rawName.removePrefix("raw/").replace("..", "_")
-            map["raw/$sanitized"] = rawContent
+            val cleaned = rawName.trimStart('/').replace("..", "_")
+            val targetPath = when {
+                cleaned.startsWith("disassembly/") -> cleaned
+                cleaned.startsWith("raw/") -> cleaned
+                else -> "raw/$cleaned"
+            }
+            map[targetPath] = rawContent
         }
 
         val hashes = linkedMapOf<String, String>()
@@ -283,6 +290,12 @@ class ArchiveManager(
         val solutions = FodJson.codec.decodeFromString<List<SolutionProposal>>(
             String(entriesMap["solutions.json"] ?: throw SecurityException("Missing solutions.json"), StandardCharsets.UTF_8)
         )
+        val disassembled = entriesMap["disassembly.json"]?.let {
+            FodJson.codec.decodeFromString<List<DisassembledArtifact>>(String(it, StandardCharsets.UTF_8))
+        }.orEmpty()
+        val mechanism = entriesMap["mechanism.json"]?.let {
+            FodJson.codec.decodeFromString<List<FodMechanismStep>>(String(it, StandardCharsets.UTF_8))
+        }.orEmpty()
 
         return DiagnosticSession(
             schemaVersion = manifest.schemaVersion,
@@ -299,7 +312,9 @@ class ArchiveManager(
             anomalies = anomalies,
             hypotheses = hypotheses,
             solutions = solutions,
-            isAnonymized = manifest.isAnonymized
+            isAnonymized = manifest.isAnonymized,
+            disassembledArtifacts = disassembled,
+            mechanismSteps = mechanism
         )
     }
 

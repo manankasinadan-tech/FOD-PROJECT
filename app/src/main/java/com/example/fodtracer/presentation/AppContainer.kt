@@ -5,6 +5,7 @@ import com.example.fodtracer.core.ai.FirebaseAiAdvisorService
 import com.example.fodtracer.core.anomaly.AnomalyEngine
 import com.example.fodtracer.core.comparator.ComparatorEngine
 import com.example.fodtracer.core.correlation.CorrelationEngine
+import com.example.fodtracer.core.disasm.DeepArtifactEngine
 import com.example.fodtracer.core.evidence.EvidenceEngine
 import com.example.fodtracer.core.probe.ProbeEngine
 import com.example.fodtracer.core.solution.SolutionEngine
@@ -38,6 +39,7 @@ class AppContainer(context: Context) {
     val aiAdvisorService: AiAdvisorService = FirebaseAiAdvisorService(appContext)
 
     val probeEngine = ProbeEngine(appContext, shellExecutor, privilegeManager)
+    val deepArtifactEngine = DeepArtifactEngine(shellExecutor)
     val evidenceEngine = EvidenceEngine()
     val correlationEngine = CorrelationEngine()
     val anomalyEngine = AnomalyEngine()
@@ -52,6 +54,7 @@ class AppContainer(context: Context) {
         correlationEngine = correlationEngine,
         anomalyEngine = anomalyEngine,
         solutionEngine = solutionEngine,
+        deepArtifactEngine = deepArtifactEngine,
         repository = diagnosticRepository
     )
 
@@ -59,6 +62,7 @@ class AppContainer(context: Context) {
         correlationEngine = correlationEngine,
         anomalyEngine = anomalyEngine,
         solutionEngine = solutionEngine,
+        deepArtifactEngine = deepArtifactEngine,
         repository = diagnosticRepository
     )
 

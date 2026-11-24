@@ -30,6 +30,7 @@ enum class DashboardSection {
     CORRELATIONS,
     HYPOTHESES,
     INACCESSIBLE,
+    DISASSEMBLY,
     SYNTHESIS
 }
 
@@ -139,7 +140,7 @@ class DiagnosticViewModel(
                 FodLiveTracerService.stop(appContext)
                 val base = activeSession.value ?: return@launch
                 finalizeLiveTraceUseCase(base, liveData, liveEvidence)
-                _selectedSection.value = DashboardSection.TIMELINE
+                _selectedSection.value = DashboardSection.DISASSEMBLY
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

@@ -3,6 +3,8 @@ package com.example.fodtracer.domain.usecases
 import com.example.fodtracer.core.anomaly.AnomalyEngine
 import com.example.fodtracer.core.comparator.ComparatorEngine
 import com.example.fodtracer.core.correlation.CorrelationEngine
+import com.example.fodtracer.core.disasm.DeepArtifactEngine
+import com.example.fodtracer.core.disasm.FodLogicReconstructor
 import com.example.fodtracer.core.evidence.EvidenceEngine
 import com.example.fodtracer.core.probe.ColdDiscoveryOutput
 import com.example.fodtracer.core.probe.ProbeEngine
@@ -22,6 +24,7 @@ class RunColdDiagnosticUseCase(
     private val correlationEngine: CorrelationEngine,
     private val anomalyEngine: AnomalyEngine,
     private val solutionEngine: SolutionEngine,
+    private val deepArtifactEngine: DeepArtifactEngine,
     private val repository: DiagnosticRepository
 ) {
     operator fun invoke(): Flow<Pair<ProbeExecutionProgress, DiagnosticSession?>> {
@@ -36,7 +39,7 @@ class RunColdDiagnosticUseCase(
         }
     }
 
-    private fun assembleSession(discovery: ColdDiscoveryOutput): DiagnosticSession {
+    private suspend fun assembleSession(discovery: ColdDiscoveryOutput): DiagnosticSession {
         val now = System.currentTimeMillis()
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date(now))
         val sessionId = "FOD-$stamp-${discovery.environment.device.take(10)}"
@@ -49,6 +52,18 @@ class RunColdDiagnosticUseCase(
             probeResults = discovery.probeResults,
             components = linkedComponents,
             evidence = rawEvidence,
+            liveTrace = null
+        )
+
+        val allowRoot = discovery.environment.rootState == RootState.GRANTED_VERIFIED
+        val deepOut = deepArtifactEngine.inspectAll(
+            probeResults = discovery.probeResults,
+            runtimeSnapshots = emptyList(),
+            allowRoot = allowRoot
+        )
+        val mechanismSteps = FodLogicReconstructor.reconstruct(
+            probeResults = discovery.probeResults,
+            artifacts = deepOut.artifacts,
             liveTrace = null
         )
 
@@ -66,7 +81,10 @@ class RunColdDiagnosticUseCase(
             correlations = correlationOut.correlations,
             anomalies = anomalyOut.anomalies,
             hypotheses = anomalyOut.hypotheses,
-            solutions = emptyList()
+            solutions = emptyList(),
+            rawArtifacts = deepOut.rawFiles,
+            disassembledArtifacts = deepOut.artifacts,
+            mechanismSteps = mechanismSteps
         )
         val solutions = solutionEngine.evaluateDiagnostic(preliminary)
         return preliminary.copy(solutions = solutions)
@@ -77,6 +95,7 @@ class FinalizeLiveTraceUseCase(
     private val correlationEngine: CorrelationEngine,
     private val anomalyEngine: AnomalyEngine,
     private val solutionEngine: SolutionEngine,
+    private val deepArtifactEngine: DeepArtifactEngine,
     private val repository: DiagnosticRepository
 ) {
     suspend operator fun invoke(
@@ -97,6 +116,26 @@ class FinalizeLiveTraceUseCase(
             evidence = mergedEvidence,
             liveTrace = liveTrace
         )
+
+        val allowRoot = baseSession.environment.rootState == RootState.GRANTED_VERIFIED
+        val deepOut = deepArtifactEngine.inspectAll(
+            probeResults = baseSession.probeResults,
+            runtimeSnapshots = liveTrace.runtimeSnapshots,
+            allowRoot = allowRoot
+        )
+        val mergedArtifacts = (baseSession.disassembledArtifacts + deepOut.artifacts)
+            .associateBy { "${it.path}|${it.kind.name}" }
+            .values
+            .toList()
+        val mergedRaw = baseSession.rawArtifacts.toMutableMap().apply {
+            putAll(deepOut.rawFiles)
+        }
+        val mechanismSteps = FodLogicReconstructor.reconstruct(
+            probeResults = baseSession.probeResults,
+            artifacts = mergedArtifacts,
+            liveTrace = liveTrace
+        )
+
         val updated = baseSession.copy(
             updatedAtCivilMs = System.currentTimeMillis(),
             evidence = mergedEvidence,
@@ -104,7 +143,10 @@ class FinalizeLiveTraceUseCase(
             dependencies = correlationOut.dependencyLinks,
             correlations = correlationOut.correlations,
             anomalies = anomalyOut.anomalies,
-            hypotheses = anomalyOut.hypotheses
+            hypotheses = anomalyOut.hypotheses,
+            rawArtifacts = mergedRaw,
+            disassembledArtifacts = mergedArtifacts,
+            mechanismSteps = mechanismSteps
         )
         val solutions = solutionEngine.evaluateDiagnostic(updated)
         val finalSession = updated.copy(solutions = solutions)

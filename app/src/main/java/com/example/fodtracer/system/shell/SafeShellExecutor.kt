@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
 
@@ -46,8 +47,17 @@ class SafeShellExecutor(
             )
         }
 
-        val suPath = if (useRoot) suBinaryResolver() else null
-        if (useRoot && suPath == null) {
+        val resolvedSu = if (useRoot) suBinaryResolver() else null
+        // Even if File.exists()/canExecute() returns null under mount-namespace/SELinux hiding
+        // (common on KernelSU/APatch/Zygisk), still attempt executing "su" directly when suBinaryResolver
+        // uses the default lookup, unless a test explicitly injected a null-returning resolver.
+        val suExecutable = if (useRoot) {
+            resolvedSu ?: if (suBinaryResolver === DEFAULT_SU_RESOLVER) "su" else null
+        } else {
+            null
+        }
+
+        if (useRoot && suExecutable == null) {
             return@withContext ShellExecutionResult(
                 exitCode = -1,
                 stdout = "",
@@ -61,10 +71,118 @@ class SafeShellExecutor(
             )
         }
 
+        executeWithCommand(
+            args = args,
+            suExecutable = suExecutable,
+            useRoot = useRoot,
+            timeoutMs = timeoutMs,
+            maxOutputBytes = maxOutputBytes,
+            displayName = spec.displayName,
+            startNanos = startNanos
+        )
+    }
+
+    /**
+     * Tries a specific su binary path (used during interactive Root verification).
+     */
+    suspend fun executeWithExplicitSu(
+        spec: ShellCommandSpec,
+        suPath: String,
+        timeoutMs: Long = 12_000L,
+        maxOutputBytes: Int = 65_536
+    ): ShellExecutionResult = withContext(Dispatchers.IO) {
+        val args = buildArgv(spec)
+        if (args.isEmpty()) {
+            return@withContext ShellExecutionResult(
+                exitCode = -1,
+                stdout = "",
+                stderr = "Invalid command spec.",
+                truncated = false,
+                timedOut = false,
+                denied = true,
+                usedRoot = true,
+                durationMs = 0L,
+                commandDisplay = spec.displayName
+            )
+        }
+        executeWithCommand(
+            args = args,
+            suExecutable = suPath,
+            useRoot = true,
+            timeoutMs = timeoutMs,
+            maxOutputBytes = maxOutputBytes,
+            displayName = spec.displayName,
+            startNanos = System.nanoTime()
+        )
+    }
+
+    /**
+     * Reads up to [maxBytes] of raw binary bytes from a validated [SafeSystemPath] for ELF/DEX/APK disassembly.
+     * Prefers direct read-only stream when accessible, falling back to bounded Root `head -c` if needed.
+     */
+    suspend fun readBinaryBytes(
+        path: SafeSystemPath,
+        useRoot: Boolean,
+        maxBytes: Int = 2_097_152,
+        timeoutMs: Long = 4_500L
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        val boundedCap = maxBytes.coerceIn(1024, 6_291_456)
+        // 1. Direct read-only file access (fast, zero process spawn)
+        val direct = runCatching {
+            val file = File(path.value)
+            if (file.exists() && file.isFile && file.canRead()) {
+                FileInputStream(file).use { fis ->
+                    readBoundedRawBytes(fis, boundedCap).first
+                }
+            } else null
+        }.getOrNull()
+        if (direct != null && direct.isNotEmpty()) return@withContext direct
+
+        if (!useRoot) return@withContext null
+
+        val suCmd = suBinaryResolver() ?: if (suBinaryResolver === DEFAULT_SU_RESOLVER) "su" else return@withContext null
         var process: Process? = null
         try {
-            val pb = if (useRoot && suPath != null) {
-                ProcessBuilder(suPath, "-c", args.joinToString(" "))
+            val pb = ProcessBuilder(suCmd, "-c", "head -c $boundedCap ${path.value}")
+            pb.redirectErrorStream(false)
+            process = pb.start()
+            val activeProcess = process
+            val res = withTimeoutOrNull(timeoutMs) {
+                coroutineScope {
+                    val outJob = async(Dispatchers.IO) { readBoundedRawBytes(activeProcess.inputStream, boundedCap) }
+                    val errJob = async(Dispatchers.IO) { readBoundedStream(activeProcess.errorStream, 4096) }
+                    val exit = activeProcess.waitFor()
+                    val bytes = outJob.await().first
+                    errJob.await()
+                    if (exit == 0 || bytes.isNotEmpty()) bytes else null
+                }
+            }
+            if (res == null) {
+                activeProcess.destroyForcibly()
+            }
+            res?.takeIf { it.isNotEmpty() }
+        } catch (e: CancellationException) {
+            process?.destroyForcibly()
+            throw e
+        } catch (_: Exception) {
+            process?.destroyForcibly()
+            null
+        }
+    }
+
+    private suspend fun executeWithCommand(
+        args: List<String>,
+        suExecutable: String?,
+        useRoot: Boolean,
+        timeoutMs: Long,
+        maxOutputBytes: Int,
+        displayName: String,
+        startNanos: Long
+    ): ShellExecutionResult {
+        var process: Process? = null
+        return try {
+            val pb = if (useRoot && suExecutable != null) {
+                ProcessBuilder(suExecutable, "-c", args.joinToString(" "))
             } else {
                 ProcessBuilder(args)
             }
@@ -99,10 +217,10 @@ class SafeShellExecutor(
                     denied = false,
                     usedRoot = useRoot,
                     durationMs = elapsedMs,
-                    commandDisplay = spec.displayName
+                    commandDisplay = displayName
                 )
                 appendLog(timedOutRes)
-                return@withContext timedOutRes
+                return timedOutRes
             }
 
             val (exitCode, outPair, errPair) = result
@@ -126,7 +244,7 @@ class SafeShellExecutor(
                 denied = denied,
                 usedRoot = useRoot,
                 durationMs = elapsedMs,
-                commandDisplay = spec.displayName
+                commandDisplay = displayName
             )
             appendLog(finalRes)
             finalRes
@@ -137,7 +255,7 @@ class SafeShellExecutor(
             process?.destroyForcibly()
             val elapsedMs = ((System.nanoTime() - startNanos) / 1_000_000L).coerceAtLeast(0L)
             val msg = e.localizedMessage ?: "Execution failed"
-            val denied = msg.lowercase().contains("permission denied")
+            val denied = msg.lowercase().contains("permission denied") || msg.lowercase().contains("no such file")
             val errRes = ShellExecutionResult(
                 exitCode = -1,
                 stdout = "",
@@ -147,7 +265,7 @@ class SafeShellExecutor(
                 denied = denied,
                 usedRoot = useRoot,
                 durationMs = elapsedMs,
-                commandDisplay = spec.displayName
+                commandDisplay = displayName
             )
             appendLog(errRes)
             errRes
@@ -164,7 +282,7 @@ class SafeShellExecutor(
         is ShellCommandSpec.CmdOverlayList -> listOf("cmd", "overlay", "list", "--user", spec.userId.toString())
         is ShellCommandSpec.ReadSystemFile -> listOf("cat", spec.path.value)
         is ShellCommandSpec.ListSystemDir -> {
-            val boundedDepth = spec.maxDepth.coerceIn(1, 3)
+            val boundedDepth = spec.maxDepth.coerceIn(1, 4)
             listOf("find", spec.path.value, "-maxdepth", boundedDepth.toString())
         }
         is ShellCommandSpec.LogcatSnapshot -> {
@@ -185,10 +303,24 @@ class SafeShellExecutor(
             }
         }
         is ShellCommandSpec.DmesgTail -> listOf("dmesg")
+        is ShellCommandSpec.ReadSystemBinaryBase64 -> {
+            val count = spec.maxBytes.coerceIn(1024, 2_097_152)
+            listOf("head", "-c", count.toString(), spec.path.value)
+        }
+        is ShellCommandSpec.ListProcesses -> listOf("ps", "-A", "-o", "PID,NAME")
+        is ShellCommandSpec.InspectProcPid -> {
+            if (spec.pid <= 0) emptyList()
+            else when (spec.target) {
+                AllowedProcTarget.FD -> listOf("ls", "-l", "/proc/${spec.pid}/fd")
+                AllowedProcTarget.MAPS -> listOf("cat", "/proc/${spec.pid}/maps")
+                AllowedProcTarget.CMDLINE -> listOf("cat", "/proc/${spec.pid}/cmdline")
+                AllowedProcTarget.STATUS -> listOf("cat", "/proc/${spec.pid}/status")
+            }
+        }
     }
 
-    private fun readBoundedStream(stream: InputStream, maxBytes: Int): Pair<String, Boolean> {
-        val buffer = ByteArray(4096)
+    private fun readBoundedRawBytes(stream: InputStream, maxBytes: Int): Pair<ByteArray, Boolean> {
+        val buffer = ByteArray(8192)
         val out = ByteArrayOutputStream()
         var total = 0
         var truncated = false
@@ -208,7 +340,12 @@ class SafeShellExecutor(
                 break
             }
         }
-        return String(out.toByteArray(), StandardCharsets.UTF_8) to truncated
+        return out.toByteArray() to truncated
+    }
+
+    private fun readBoundedStream(stream: InputStream, maxBytes: Int): Pair<String, Boolean> {
+        val (bytes, truncated) = readBoundedRawBytes(stream, maxBytes)
+        return String(bytes, StandardCharsets.UTF_8) to truncated
     }
 
     private fun appendLog(result: ShellExecutionResult) {
@@ -222,14 +359,14 @@ class SafeShellExecutor(
             outputBytes = result.stdout.length + result.stderr.length
         )
         _recentLogs.update { current ->
-            (listOf(entry) + current).take(100)
+            (listOf(entry) + current).take(120)
         }
     }
 
     companion object {
         private val ALLOWED_LOGCAT_BUFFERS = setOf("main", "system", "events", "crash", "radio")
 
-        private val SU_CANDIDATE_PATHS = listOf(
+        val SU_CANDIDATE_PATHS = listOf(
             "/system/bin/su",
             "/system/xbin/su",
             "/sbin/su",
@@ -241,6 +378,8 @@ class SafeShellExecutor(
             "/data/adb/ap/bin/su",
             "/data/adb/magisk/su"
         )
+
+        private val DEFAULT_SU_RESOLVER: () -> String? = ::findDefaultSuBinary
 
         fun findDefaultSuBinary(): String? {
             SU_CANDIDATE_PATHS.firstOrNull { path ->

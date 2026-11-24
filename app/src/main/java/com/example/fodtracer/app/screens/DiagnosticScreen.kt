@@ -13,7 +13,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Stop
@@ -21,8 +25,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.fodtracer.app.components.*
@@ -238,6 +244,7 @@ fun DiagnosticScreen(
                     DashboardSection.CORRELATIONS to strings.tabCorrelations,
                     DashboardSection.HYPOTHESES to strings.tabHypotheses,
                     DashboardSection.INACCESSIBLE to strings.tabInaccessible,
+                    DashboardSection.DISASSEMBLY to strings.tabDisassembly,
                     DashboardSection.SYNTHESIS to strings.tabSynthesis
                 )
 
@@ -280,6 +287,7 @@ private fun DashboardSectionContent(
 ) {
     val strings = LocalFodStrings.current
     val sem = LocalSemanticColors.current
+    val clipboardManager = LocalClipboardManager.current
 
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -514,13 +522,152 @@ private fun DashboardSectionContent(
                 }
             }
 
+            DashboardSection.DISASSEMBLY -> {
+                item {
+                    LabCard(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(strings.mechanismChainTitle, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                            Icon(Icons.Filled.Memory, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Stages=${session.mechanismSteps.size} • Proved=${session.mechanismSteps.count { it.epistemicLevel == EpistemicLevel.PROVED }} • Artifacts=${session.disassembledArtifacts.size}",
+                            style = MonoTextStyle
+                        )
+                    }
+                }
+
+                items(session.mechanismSteps, key = { "mech_${it.order}" }) { step ->
+                    LabCard(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(step.stageName, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                            EpistemicBadge(step.epistemicLevel)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text("${step.componentName} • Live=${if (step.verifiedInLiveTrace) "YES" else "NO"}", style = MonoTextStyle)
+                        Spacer(Modifier.height(4.dp))
+                        Text(step.mechanismSummary, style = MaterialTheme.typography.bodyMedium)
+                        if (step.involvedFiles.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            MonoCodeBlock("Files:\n" + step.involvedFiles.joinToString("\n"))
+                        }
+                        if (step.observedSymbolsOrCalls.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            MonoCodeBlock("Symbols/Calls:\n" + step.observedSymbolsOrCalls.joinToString("\n"))
+                        }
+                        if (step.runtimeProofs.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            MonoCodeBlock("Runtime Proofs:\n" + step.runtimeProofs.joinToString("\n"))
+                        }
+                        step.missingInfo?.let { miss ->
+                            Spacer(Modifier.height(4.dp))
+                            Text(miss, style = MaterialTheme.typography.bodySmall, color = sem.hypothesis)
+                        }
+                    }
+                }
+
+                item {
+                    LabCard(modifier = Modifier.fillMaxWidth()) {
+                        Text(strings.disassembledFilesTitle, style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+
+                if (session.disassembledArtifacts.isEmpty()) {
+                    item {
+                        LabCard(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                "No ELF/DEX/RRO/procfs artifacts extracted yet (verify Root or re-run ANALYZE).",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                } else {
+                    items(session.disassembledArtifacts, key = { it.id }) { artifact ->
+                        var expanded by remember(artifact.id) { mutableStateOf(false) }
+                        val rawDump = artifact.rawFileName?.let { session.rawArtifacts[it] } ?: artifact.disassemblySnippet
+                        LabCard(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(artifact.name, style = MaterialTheme.typography.titleMedium)
+                                    Text(
+                                        "${artifact.kind.name} • ${artifact.partition.name}" +
+                                            (artifact.architecture?.let { " • $it" } ?: ""),
+                                        style = MonoTextStyle,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                EpistemicBadge(artifact.epistemicLevel)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(artifact.path, style = MonoTextStyle)
+                            if (artifact.neededLibraries.isNotEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "NEEDED: ${artifact.neededLibraries.joinToString(", ")}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(
+                                    onClick = { clipboardManager.setText(AnnotatedString(rawDump)) },
+                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                ) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(strings.copyCodeLabel)
+                                }
+                                IconButton(
+                                    onClick = { expanded = !expanded },
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .testTag("toggle_disasm_${artifact.id}")
+                                ) {
+                                    Icon(
+                                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                        contentDescription = artifact.name
+                                    )
+                                }
+                            }
+                            if (expanded) {
+                                if (artifact.keySymbols.isNotEmpty()) {
+                                    MonoCodeBlock("Key Symbols:\n" + artifact.keySymbols.take(24).joinToString("\n"))
+                                    Spacer(Modifier.height(6.dp))
+                                }
+                                if (artifact.extractedStrings.isNotEmpty()) {
+                                    MonoCodeBlock("Extracted Strings/FDs:\n" + artifact.extractedStrings.take(24).joinToString("\n"))
+                                    Spacer(Modifier.height(6.dp))
+                                }
+                                if (artifact.disassemblySnippet.isNotBlank()) {
+                                    MonoCodeBlock(artifact.disassemblySnippet)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             DashboardSection.SYNTHESIS -> {
                 item {
                     LabCard(modifier = Modifier.fillMaxWidth()) {
                         Text("Diagnostic Synthesis", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            "Components=${session.components.size} • Proved=${session.evidence.count { it.epistemicLevel == EpistemicLevel.PROVED }} • Anomalies=${session.anomalies.size} • GSI Solutions=${session.solutions.size}",
+                            "Components=${session.components.size} • Proved=${session.evidence.count { it.epistemicLevel == EpistemicLevel.PROVED }} • Anomalies=${session.anomalies.size} • Disassembled=${session.disassembledArtifacts.size} • GSI Solutions=${session.solutions.size}",
                             style = MaterialTheme.typography.bodyMedium
                         )
                         Spacer(Modifier.height(10.dp))

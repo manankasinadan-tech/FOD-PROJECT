@@ -76,6 +76,32 @@ sealed interface ShellCommandSpec {
     data class DmesgTail(val lines: Int = 200) : ShellCommandSpec {
         override val displayName: String = "dmesg"
     }
+
+    data class ReadSystemBinaryBase64(
+        val path: SafeSystemPath,
+        val offsetBytes: Long = 0L,
+        val maxBytes: Int = 1_572_864
+    ) : ShellCommandSpec {
+        override val displayName: String = "dd_b64 ${path.value}"
+    }
+
+    data class ListProcesses(val dummy: Boolean = true) : ShellCommandSpec {
+        override val displayName: String = "ps -A"
+    }
+
+    data class InspectProcPid(
+        val pid: Int,
+        val target: AllowedProcTarget
+    ) : ShellCommandSpec {
+        override val displayName: String = "proc/$pid/${target.cliName}"
+    }
+}
+
+enum class AllowedProcTarget(val cliName: String) {
+    FD("fd"),
+    MAPS("maps"),
+    CMDLINE("cmdline"),
+    STATUS("status")
 }
 
 enum class AllowedDumpsysService(val cliName: String) {
@@ -102,7 +128,8 @@ value class SafeSystemPath private constructor(val value: String) {
             "/odm/",
             "/system/",
             "/system_ext/",
-            "/product/"
+            "/product/",
+            "/apex/"
         )
 
         private val SAFE_CHARS = Regex("^[a-zA-Z0-9_./:@+-]+$")
@@ -140,7 +167,8 @@ data class PrivilegeSnapshot(
     val manageExternalStorageGranted: Boolean,
     val postNotificationsGranted: Boolean,
     val publicFodDirPath: String,
-    val publicFodDirWritable: Boolean
+    val publicFodDirWritable: Boolean,
+    val rootDiagnosticNote: String? = null
 )
 
 interface PrivilegeManager {

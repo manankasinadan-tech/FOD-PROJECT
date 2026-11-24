@@ -379,6 +379,57 @@ data class AIAnalysis(
 )
 
 @Serializable
+enum class ArtifactKind {
+    ELF_BINARY,
+    ELF_SHARED_LIB,
+    APK_DEX,
+    RRO_OVERLAY,
+    INIT_RC,
+    VINTF_XML,
+    SEPOLICY_OR_PERM,
+    PROC_RUNTIME
+}
+
+@Serializable
+data class DisassembledArtifact(
+    val id: String,
+    val name: String,
+    val path: String,
+    val partition: PartitionOrigin,
+    val kind: ArtifactKind,
+    val architecture: String? = null,
+    val neededLibraries: List<String> = emptyList(),
+    val keySymbols: List<String> = emptyList(),
+    val extractedStrings: List<String> = emptyList(),
+    val disassemblySnippet: String = "",
+    val epistemicLevel: EpistemicLevel = EpistemicLevel.PROVED,
+    val rawFileName: String? = null
+)
+
+@Serializable
+data class ProcessRuntimeSnapshot(
+    val processName: String,
+    val pid: Int,
+    val openFodDescriptors: List<String> = emptyList(),
+    val loadedFodLibraries: List<String> = emptyList(),
+    val epistemicLevel: EpistemicLevel = EpistemicLevel.PROVED
+)
+
+@Serializable
+data class FodMechanismStep(
+    val order: Int,
+    val stageName: String,
+    val componentName: String,
+    val mechanismSummary: String,
+    val involvedFiles: List<String> = emptyList(),
+    val observedSymbolsOrCalls: List<String> = emptyList(),
+    val runtimeProofs: List<String> = emptyList(),
+    val epistemicLevel: EpistemicLevel,
+    val verifiedInLiveTrace: Boolean = false,
+    val missingInfo: String? = null
+)
+
+@Serializable
 data class LiveTraceData(
     val sessionStartedMonotonicNanos: Long,
     val sessionEndedMonotonicNanos: Long,
@@ -388,7 +439,10 @@ data class LiveTraceData(
     val observedSources: List<String>,
     val inaccessibleSources: List<String>,
     val events: List<TimelineEvent>,
-    val rawBufferTruncated: Boolean = false
+    val rawBufferTruncated: Boolean = false,
+    val runtimeSnapshots: List<ProcessRuntimeSnapshot> = emptyList(),
+    val surfaceFlingerSnapshot: String? = null,
+    val dumpsysFingerprintDelta: String? = null
 )
 
 @Serializable
@@ -410,7 +464,9 @@ data class DiagnosticSession(
     val solutions: List<SolutionProposal> = emptyList(),
     val aiAnalysis: AIAnalysis? = null,
     val rawArtifacts: Map<String, String> = emptyMap(),
-    val isAnonymized: Boolean = false
+    val isAnonymized: Boolean = false,
+    val disassembledArtifacts: List<DisassembledArtifact> = emptyList(),
+    val mechanismSteps: List<FodMechanismStep> = emptyList()
 )
 
 @Serializable

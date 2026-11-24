@@ -113,9 +113,10 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(8.dp))
                     MonoCodeBlock(
-                        "su binary: ${privilegeSnapshot.suBinaryPath ?: "not detected"}\n" +
+                        "su binary: ${privilegeSnapshot.suBinaryPath ?: "not detected (trying PATH su)"}\n" +
                             "Manager hint: ${privilegeSnapshot.rootProviderHint ?: "none"}\n" +
-                            "Verified UID: ${privilegeSnapshot.rootUidInfo ?: "unverified"}"
+                            "Verified UID: ${privilegeSnapshot.rootUidInfo ?: "unverified"}" +
+                            (privilegeSnapshot.rootDiagnosticNote?.let { "\nNote: $it" } ?: "")
                     )
                     Spacer(Modifier.height(10.dp))
                     Button(
