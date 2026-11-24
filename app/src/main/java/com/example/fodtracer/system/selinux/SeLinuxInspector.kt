@@ -19,29 +19,38 @@ data class SeLinuxInspectionResult(
 class SeLinuxInspector(
     private val shellExecutor: ShellExecutor
 ) {
-    suspend fun inspect(useRoot: Boolean): SeLinuxInspectionResult {
+    suspend fun inspectStatusOnly(useRoot: Boolean): SeLinuxInspectionResult {
         var mode = readEnforceFileDirect()
         if (mode == SeLinuxMode.UNKNOWN) {
-            val enforceRes = shellExecutor.execute(ShellCommandSpec.GetEnforce, useRoot = false)
+            val enforceRes = shellExecutor.execute(ShellCommandSpec.GetEnforce, useRoot = false, timeoutMs = 1_500L)
             if (enforceRes.exitCode == 0) {
                 mode = parseMode(enforceRes.stdout)
             } else if (useRoot) {
-                val rootEnforce = shellExecutor.execute(ShellCommandSpec.GetEnforce, useRoot = true)
+                val rootEnforce = shellExecutor.execute(ShellCommandSpec.GetEnforce, useRoot = true, timeoutMs = 2_000L)
                 if (rootEnforce.exitCode == 0) {
                     mode = parseMode(rootEnforce.stdout)
                 }
             }
         }
-
-        val idRes = shellExecutor.execute(ShellCommandSpec.IdCommand, useRoot = useRoot)
+        val idRes = shellExecutor.execute(ShellCommandSpec.IdCommand, useRoot = useRoot, timeoutMs = 1_500L)
         val context = Regex("context=([^\\s]+)").find(idRes.stdout)?.groupValues?.getOrNull(1)
+        return SeLinuxInspectionResult(
+            mode = mode,
+            context = context,
+            avcDenials = emptyList(),
+            accessLimitedNote = null
+        )
+    }
 
+    suspend fun inspect(useRoot: Boolean): SeLinuxInspectionResult {
+        val base = inspectStatusOnly(useRoot)
         val avcDenials = mutableListOf<String>()
         var note: String? = null
 
         val logcatRes = shellExecutor.execute(
-            ShellCommandSpec.LogcatSnapshot(listOf("main", "system", "events"), lines = 300),
-            useRoot = useRoot
+            ShellCommandSpec.LogcatSnapshot(listOf("main", "system", "events"), lines = 250),
+            useRoot = useRoot,
+            timeoutMs = 2_500L
         )
         if (logcatRes.exitCode == 0) {
             avcDenials += extractRelevantAvc(logcatRes.stdout)
@@ -50,7 +59,7 @@ class SeLinuxInspector(
         }
 
         if (useRoot) {
-            val dmesgRes = shellExecutor.execute(ShellCommandSpec.DmesgTail(250), useRoot = true)
+            val dmesgRes = shellExecutor.execute(ShellCommandSpec.DmesgTail(250), useRoot = true, timeoutMs = 2_500L)
             if (dmesgRes.exitCode == 0) {
                 avcDenials += extractRelevantAvc(dmesgRes.stdout)
             } else if (dmesgRes.denied) {
@@ -60,9 +69,7 @@ class SeLinuxInspector(
             note = "Kernel dmesg AVC denials require Root verification."
         }
 
-        return SeLinuxInspectionResult(
-            mode = mode,
-            context = context,
+        return base.copy(
             avcDenials = avcDenials.distinct().take(40),
             accessLimitedNote = note
         )

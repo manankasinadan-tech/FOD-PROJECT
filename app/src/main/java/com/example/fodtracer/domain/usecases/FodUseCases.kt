@@ -12,7 +12,9 @@ import com.example.fodtracer.core.probe.ProbeExecutionProgress
 import com.example.fodtracer.core.solution.SolutionEngine
 import com.example.fodtracer.domain.interfaces.DiagnosticRepository
 import com.example.fodtracer.domain.models.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -36,7 +38,7 @@ class RunColdDiagnosticUseCase(
                 repository.saveSession(session)
                 progress to session
             }
-        }
+        }.flowOn(Dispatchers.IO)
     }
 
     private suspend fun assembleSession(discovery: ColdDiscoveryOutput): DiagnosticSession {

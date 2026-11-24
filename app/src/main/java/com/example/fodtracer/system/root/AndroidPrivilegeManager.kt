@@ -60,7 +60,7 @@ class AndroidPrivilegeManager(
             }
         }
 
-        val seLinuxInfo = seLinuxInspector.inspect(useRoot = _snapshot.value.rootState == RootState.GRANTED_VERIFIED)
+        val seLinuxInfo = seLinuxInspector.inspectStatusOnly(useRoot = _snapshot.value.rootState == RootState.GRANTED_VERIFIED)
         val storageGranted = isManageExternalStorageGranted()
         val notifGranted = isPostNotificationsGranted()
         val publicWritable = checkPublicDirWritable(storageGranted)
@@ -128,19 +128,7 @@ class AndroidPrivilegeManager(
         }
 
         if (verifiedPath != null && lastIdResult != null) {
-            // Confirm real kernel read capability
-            val procVersionPath = SafeSystemPath.parse("/proc/version")
-            val readVerify = if (procVersionPath != null) {
-                if (safeExec != null && verifiedPath != discoveredSu && verifiedPath != "su") {
-                    safeExec.executeWithExplicitSu(ShellCommandSpec.ReadSystemFile(procVersionPath), verifiedPath, timeoutMs = 4_000L)
-                } else {
-                    shellExecutor.execute(ShellCommandSpec.ReadSystemFile(procVersionPath), useRoot = true, timeoutMs = 4_000L)
-                }
-            } else null
-
-            if (readVerify == null || readVerify.exitCode == 0) {
-                return@withContext finalizeVerifiedRoot(verifiedPath, providerHint, lastIdResult)
-            }
+            return@withContext finalizeVerifiedRoot(verifiedPath, providerHint, lastIdResult)
         }
 
         privPrefs.edit().putBoolean(KEY_ROOT_VERIFIED, false).apply()
@@ -162,7 +150,7 @@ class AndroidPrivilegeManager(
             RootState.NOT_AVAILABLE
         }
 
-        val seLinuxInfo = seLinuxInspector.inspect(useRoot = false)
+        val seLinuxInfo = seLinuxInspector.inspectStatusOnly(useRoot = false)
         val storageGranted = isManageExternalStorageGranted()
         val updated = PrivilegeSnapshot(
             suBinaryFound = discoveredSu != null,
@@ -188,8 +176,9 @@ class AndroidPrivilegeManager(
         idResult: ShellExecutionResult
     ): PrivilegeSnapshot {
         privPrefs.edit().putBoolean(KEY_ROOT_VERIFIED, true).apply()
-        val seLinuxInfo = seLinuxInspector.inspect(useRoot = true)
         val storageGranted = isManageExternalStorageGranted()
+        val notifGranted = isPostNotificationsGranted()
+        val publicWritable = checkPublicDirWritable(storageGranted)
         val resolvedProvider = initialProviderHint ?: when {
             verifiedSuPath.contains("ksu", true) -> "KernelSU"
             verifiedSuPath.contains("/ap/", true) -> "APatch"
@@ -197,20 +186,30 @@ class AndroidPrivilegeManager(
             idResult.stdout.contains("magisk", true) -> "Magisk"
             else -> "Root (su)"
         }
+        val uidLine = idResult.stdout.trim().lineSequence().firstOrNull()
+        val immediateContext = Regex("context=([^\\s]+)").find(idResult.stdout)?.groupValues?.getOrNull(1)
 
-        val updated = PrivilegeSnapshot(
+        // Emit GRANTED_VERIFIED immediately so UI turns green without waiting for SELinux query
+        val immediate = PrivilegeSnapshot(
             suBinaryFound = true,
             suBinaryPath = verifiedSuPath,
             rootState = RootState.GRANTED_VERIFIED,
             rootProviderHint = resolvedProvider,
-            rootUidInfo = idResult.stdout.trim().lineSequence().firstOrNull(),
-            seLinuxMode = seLinuxInfo.mode,
-            seLinuxContext = seLinuxInfo.context,
+            rootUidInfo = uidLine,
+            seLinuxMode = _snapshot.value.seLinuxMode,
+            seLinuxContext = immediateContext ?: _snapshot.value.seLinuxContext,
             manageExternalStorageGranted = storageGranted,
-            postNotificationsGranted = isPostNotificationsGranted(),
+            postNotificationsGranted = notifGranted,
             publicFodDirPath = PUBLIC_FOD_DIR_PATH,
-            publicFodDirWritable = checkPublicDirWritable(storageGranted),
+            publicFodDirWritable = publicWritable,
             rootDiagnosticNote = "Verified via $verifiedSuPath"
+        )
+        _snapshot.value = immediate
+
+        val seLinuxInfo = seLinuxInspector.inspectStatusOnly(useRoot = true)
+        val updated = immediate.copy(
+            seLinuxMode = seLinuxInfo.mode,
+            seLinuxContext = seLinuxInfo.context ?: immediate.seLinuxContext
         )
         _snapshot.value = updated
         return updated

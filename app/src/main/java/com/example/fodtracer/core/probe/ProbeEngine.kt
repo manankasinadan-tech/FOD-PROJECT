@@ -6,8 +6,10 @@ import com.example.fodtracer.domain.interfaces.*
 import com.example.fodtracer.domain.models.*
 import com.example.fodtracer.system.biometrics.AndroidBiometricInspector
 import com.example.fodtracer.system.selinux.SeLinuxInspector
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 
 data class ProbeExecutionProgress(
     val completedCount: Int,
@@ -86,7 +88,7 @@ class ProbeEngine(
                 latestResult = results.lastOrNull()
             ) to finalOutput
         )
-    }
+    }.flowOn(Dispatchers.IO)
 
     private fun extractPropertiesMap(results: List<ProbeResult>): Map<String, String> {
         val propResult = results.firstOrNull { it.domain == ProbeDomain.PROPERTIES } ?: return emptyMap()

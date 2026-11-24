@@ -51,6 +51,21 @@ class FodEnginesAndSecurityTest {
     }
 
     @Test
+    fun `SafeShellExecutor truncates large output without pipe deadlock`() = runTest {
+        val executor = SafeShellExecutor()
+        // Reading /proc/cpuinfo with a tiny 16-byte cap must cleanly truncate and exit immediately
+        val cpuInfo = SafeSystemPath.parse("/proc/cpuinfo")!!
+        val res = executor.execute(
+            spec = ShellCommandSpec.ReadSystemFile(cpuInfo),
+            useRoot = false,
+            timeoutMs = 2_000L,
+            maxOutputBytes = 16
+        )
+        assertFalse(res.timedOut)
+        assertTrue(res.stdout.length <= 16)
+    }
+
+    @Test
     fun `Evidence, Correlation, and Anomaly engines never promote INACCESSIBLE to NOT_FOUND or fake anomaly`() {
         val rom = ReferenceBaselineFixtures.createFailingGsiBaseline()
         val blockedProbe = ProbeResult(

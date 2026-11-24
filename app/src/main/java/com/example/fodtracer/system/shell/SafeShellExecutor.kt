@@ -5,17 +5,20 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicBoolean
 
 class SafeShellExecutor(
     private val suBinaryResolver: () -> String? = ::findDefaultSuBinary
@@ -147,25 +150,32 @@ class SafeShellExecutor(
             pb.redirectErrorStream(false)
             process = pb.start()
             val activeProcess = process
-            val res = withTimeoutOrNull(timeoutMs) {
-                coroutineScope {
+            runCatching { activeProcess.outputStream.close() }
+
+            val timedOut = AtomicBoolean(false)
+            val res = coroutineScope {
+                val watchdog = launch(Dispatchers.IO) {
+                    delay(timeoutMs)
+                    timedOut.set(true)
+                    killAndCloseStreams(activeProcess)
+                }
+                try {
                     val outJob = async(Dispatchers.IO) { readBoundedRawBytes(activeProcess.inputStream, boundedCap) }
                     val errJob = async(Dispatchers.IO) { readBoundedStream(activeProcess.errorStream, 4096) }
-                    val exit = activeProcess.waitFor()
-                    val bytes = outJob.await().first
-                    errJob.await()
-                    if (exit == 0 || bytes.isNotEmpty()) bytes else null
+                    val exit = runInterruptible(Dispatchers.IO) { activeProcess.waitFor() }
+                    val bytes = runCatching { outJob.await().first }.getOrDefault(ByteArray(0))
+                    runCatching { errJob.await() }
+                    if (!timedOut.get() && (exit == 0 || bytes.isNotEmpty())) bytes else null
+                } finally {
+                    watchdog.cancel()
                 }
-            }
-            if (res == null) {
-                activeProcess.destroyForcibly()
             }
             res?.takeIf { it.isNotEmpty() }
         } catch (e: CancellationException) {
-            process?.destroyForcibly()
+            process?.let { killAndCloseStreams(it) }
             throw e
         } catch (_: Exception) {
-            process?.destroyForcibly()
+            process?.let { killAndCloseStreams(it) }
             null
         }
     }
@@ -190,29 +200,39 @@ class SafeShellExecutor(
             process = pb.start()
 
             val activeProcess = process
-            val result = withTimeoutOrNull(timeoutMs) {
-                coroutineScope {
+            // Immediately close stdin so su/child processes never wait for interactive input/EOF.
+            runCatching { activeProcess.outputStream.close() }
+
+            val timedOut = AtomicBoolean(false)
+            val outcome = coroutineScope {
+                val watchdog = launch(Dispatchers.IO) {
+                    delay(timeoutMs)
+                    timedOut.set(true)
+                    killAndCloseStreams(activeProcess)
+                }
+                try {
                     val stdoutJob = async(Dispatchers.IO) {
                         readBoundedStream(activeProcess.inputStream, maxOutputBytes)
                     }
                     val stderrJob = async(Dispatchers.IO) {
-                        readBoundedStream(activeProcess.errorStream, maxOutputBytes / 4)
+                        readBoundedStream(activeProcess.errorStream, (maxOutputBytes / 4).coerceAtLeast(4096))
                     }
-                    val exitCode = activeProcess.waitFor()
-                    val out = stdoutJob.await()
-                    val err = stderrJob.await()
+                    val exitCode = runInterruptible(Dispatchers.IO) { activeProcess.waitFor() }
+                    val out = runCatching { stdoutJob.await() }.getOrElse { "" to false }
+                    val err = runCatching { stderrJob.await() }.getOrElse { "" to false }
                     Triple(exitCode, out, err)
+                } finally {
+                    watchdog.cancel()
                 }
             }
 
             val elapsedMs = ((System.nanoTime() - startNanos) / 1_000_000L).coerceAtLeast(0L)
-            if (result == null) {
-                activeProcess.destroyForcibly()
+            if (timedOut.get()) {
                 val timedOutRes = ShellExecutionResult(
                     exitCode = -1,
-                    stdout = "",
+                    stdout = outcome.second.first,
                     stderr = "Command timed out after ${timeoutMs}ms.",
-                    truncated = false,
+                    truncated = true,
                     timedOut = true,
                     denied = false,
                     usedRoot = useRoot,
@@ -223,7 +243,7 @@ class SafeShellExecutor(
                 return timedOutRes
             }
 
-            val (exitCode, outPair, errPair) = result
+            val (exitCode, outPair, errPair) = outcome
             val stdoutText = outPair.first
             val stderrText = errPair.first
             val combinedLower = (stderrText + "\n" + stdoutText).lowercase()
@@ -249,10 +269,10 @@ class SafeShellExecutor(
             appendLog(finalRes)
             finalRes
         } catch (e: CancellationException) {
-            process?.destroyForcibly()
+            process?.let { killAndCloseStreams(it) }
             throw e
         } catch (e: Exception) {
-            process?.destroyForcibly()
+            process?.let { killAndCloseStreams(it) }
             val elapsedMs = ((System.nanoTime() - startNanos) / 1_000_000L).coerceAtLeast(0L)
             val msg = e.localizedMessage ?: "Execution failed"
             val denied = msg.lowercase().contains("permission denied") || msg.lowercase().contains("no such file")
@@ -270,6 +290,12 @@ class SafeShellExecutor(
             appendLog(errRes)
             errRes
         }
+    }
+
+    private fun killAndCloseStreams(process: Process) {
+        runCatching { process.destroyForcibly() }
+        runCatching { process.inputStream.close() }
+        runCatching { process.errorStream.close() }
     }
 
     private fun buildArgv(spec: ShellCommandSpec): List<String> = when (spec) {
@@ -319,26 +345,33 @@ class SafeShellExecutor(
         }
     }
 
+    /**
+     * Reads up to [maxBytes] into memory, then drains remaining bytes until EOF (without retaining them)
+     * so child processes never block on a full stdout/stderr kernel pipe before exiting.
+     */
     private fun readBoundedRawBytes(stream: InputStream, maxBytes: Int): Pair<ByteArray, Boolean> {
         val buffer = ByteArray(8192)
         val out = ByteArrayOutputStream()
-        var total = 0
+        var retained = 0
         var truncated = false
-        while (true) {
-            val read = stream.read(buffer)
-            if (read == -1) break
-            val remaining = maxBytes - total
-            if (remaining <= 0) {
-                truncated = true
-                break
+        try {
+            while (true) {
+                val read = stream.read(buffer)
+                if (read == -1) break
+                val remaining = maxBytes - retained
+                if (remaining > 0) {
+                    val toWrite = minOf(read, remaining)
+                    out.write(buffer, 0, toWrite)
+                    retained += toWrite
+                    if (toWrite < read) {
+                        truncated = true
+                    }
+                } else {
+                    truncated = true
+                }
             }
-            val toWrite = minOf(read, remaining)
-            out.write(buffer, 0, toWrite)
-            total += toWrite
-            if (toWrite < read) {
-                truncated = true
-                break
-            }
+        } catch (_: Exception) {
+            // Stream closed forcibly on timeout or process kill
         }
         return out.toByteArray() to truncated
     }
