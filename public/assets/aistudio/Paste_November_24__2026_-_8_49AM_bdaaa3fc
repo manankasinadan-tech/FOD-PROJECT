@@ -1,0 +1,1137 @@
+FODTRACER — CAHIER DES CHARGES TECHNIQUE & PLAN D'IMPLÉMENTATION
+
+1. IDENTITÉ ET OBJECTIF DU PROJET
+
+Nom : FodTracer
+Type : Application Android native d'investigation FOD / UDFPS.
+
+Objectif principal
+
+Développer une application Android capable de découvrir, analyser, diagnostiquer et comprendre le fonctionnement complet du mécanisme Fingerprint On Display (FOD / UDFPS), notamment sur les Custom ROM et GSI.
+
+FodTracer doit être capable de :
+
+- Cartographier dynamiquement l'environnement FOD d'un appareil.
+- Identifier les composants matériels et logiciels impliqués.
+- Observer le déroulement réel d'un enrôlement biométrique.
+- Détecter et localiser les anomalies dans la chaîne d'exécution.
+- Comparer une Custom ROM fonctionnelle avec une GSI défaillante.
+- Identifier les possibilités de correction réalisables exclusivement côté GSI.
+- Produire des rapports techniques structurés, vérifiables et exploitables.
+- Utiliser une IA facultative pour approfondir l'interprétation des résultats.
+
+Principe fondamental : FodTracer est un outil d'investigation et de diagnostic. Il ne doit jamais modifier automatiquement le système, flasher des partitions ou appliquer des correctifs.
+
+L'objectif est de comprendre précisément pourquoi un mécanisme FOD fonctionne ou échoue, et de déterminer où se situe réellement le problème.
+
+---
+
+2. ARCHITECTURE GÉNÉRALE DE L'APPLICATION
+
+L'application possède quatre fonctionnalités principales, accessibles depuis un écran d'accueil minimaliste.
+
+2.1 DIAGNOSTIC
+
+Moteur principal d'investigation FOD comprenant deux phases :
+
+- COLD DIAGNOSTIC : découverte et analyse statique.
+- LIVE TRACER : observation dynamique pendant l'enrôlement biométrique.
+
+2.2 COMPARATEUR
+
+Comparaison approfondie entre deux rapports de diagnostic :
+
+- Custom ROM fonctionnelle.
+- GSI à examiner.
+
+2.3 SOLUTIONS & IA
+
+Identification, classification et justification des corrections potentiellement réalisables côté GSI, avec une analyse IA facultative.
+
+2.4 ARCHIVES & EXPORT
+
+Gestion des sessions, rapports, données collectées, importations et exportations ZIP.
+
+Ces quatre fonctionnalités doivent rester indépendantes dans leur présentation, mais partager les mêmes moteurs internes et les mêmes modèles de données.
+
+---
+
+3. ARCHITECTURE DU MOTEUR CENTRAL
+
+Construire un moteur d'investigation composé de six sous-systèmes indépendants.
+
+3.1 PROBE ENGINE — Moteur de découverte
+
+Responsabilité : découvrir les ressources et composants liés au FOD sans imposer une architecture constructeur prédéfinie.
+
+Le moteur doit fonctionner avec des sondes autonomes, spécialisées et extensibles.
+
+Organisation :
+
+- hardware/
+- biometric/
+- framework/
+- systemui/
+- hal/
+- vendor/
+- display/
+- kernel/
+- touch/
+- overlay/
+- selinux/
+- properties/
+
+Chaque sonde doit pouvoir être exécutée indépendamment, retourner un résultat normalisé et signaler précisément ses limites d'accès.
+
+Le moteur doit notamment explorer, selon les permissions disponibles :
+
+- /sys
+- /proc
+- /dev
+- /system
+- /system_ext
+- /vendor
+- /odm
+- Services Binder, AIDL et HIDL.
+- Packages et ressources Android.
+- Bibliothèques natives.
+- Propriétés système.
+- Interfaces biométriques.
+- Interfaces display et tactile.
+
+La découverte doit être adaptative et non limitée à une liste fixe de chemins propres à un constructeur.
+
+Prévoir des règles de découverte, des listes de chemins pertinents, des limites de profondeur, des délais d'exécution et des restrictions de lecture.
+
+Ne jamais effectuer une exploration récursive illimitée du système.
+
+3.2 EVIDENCE ENGINE — Moteur de preuves
+
+Responsabilité : garantir la traçabilité et la fiabilité des informations collectées.
+
+Chaque information importante doit être accompagnée de :
+
+- Identifiant unique.
+- Source exacte.
+- Type de ressource.
+- Valeur ou résultat observé.
+- Horodatage.
+- Méthode de collecte.
+- Niveau d'accès utilisé.
+- Résultat d'exécution.
+- Référence vers les données brutes éventuelles.
+
+Niveaux épistémiques :
+
+- PROUVÉ : observation directe et vérifiable.
+- CORRÉLÉ : relation établie entre plusieurs observations.
+- HYPOTHÈSE : explication possible non démontrée.
+- INACCESSIBLE : information non vérifiable avec les accès disponibles.
+
+Statuts de découverte :
+
+- FOUND : ressource trouvée.
+- NOT_FOUND : recherche suffisamment complète sans résultat.
+- INACCESSIBLE : accès refusé.
+- UNSUPPORTED : sonde non applicable.
+- ERROR : erreur d'exécution.
+- PARTIAL : résultat incomplet.
+
+Une ressource inaccessible ne doit jamais être considérée comme inexistante.
+
+Une absence d'événement dans les journaux ne constitue pas automatiquement une preuve d'échec.
+
+3.3 CORRELATION ENGINE — Moteur de corrélation
+
+Responsabilité : relier les composants et événements pour reconstituer le fonctionnement du mécanisme FOD.
+
+Le moteur doit analyser les relations entre :
+
+- Application système et SystemUI.
+- Framework biométrique.
+- BiometricService.
+- UdfpsController.
+- HAL biométrique.
+- Services constructeurs.
+- Drivers Kernel.
+- Display et HBM/LHBM.
+- Contrôleur tactile.
+- Ressources et overlays.
+
+Il doit identifier les dépendances attendues, les relations observées et les éléments dont le fonctionnement ne peut pas être vérifié.
+
+Ne jamais considérer une relation théorique comme une relation réellement observée.
+
+3.4 ANOMALY ENGINE — Moteur d'anomalies
+
+Responsabilité : détecter les incohérences et ruptures dans le fonctionnement du FOD.
+
+Exemples :
+
+- Interface UDFPS absente.
+- Service biométrique indisponible.
+- Échec d'initialisation HAL.
+- Communication HAL interrompue.
+- Activation HBM non observée alors que sa surveillance est disponible.
+- Événement tactile absent dans une source effectivement surveillée.
+- Timeout biométrique.
+- Erreur de traitement.
+- Denial SELinux pertinent.
+- Ressource ou configuration incohérente.
+
+Chaque anomalie doit comporter :
+
+- Description.
+- Composant concerné.
+- Gravité.
+- Sources justificatives.
+- Niveau de preuve.
+- Événements associés.
+- Causes possibles.
+- Données manquantes.
+- Étapes d'investigation recommandées.
+
+Ne jamais déclarer une panne sur la seule base d'une supposition.
+
+3.5 SOLUTION ENGINE — Moteur de solutions
+
+Responsabilité : déterminer les possibilités de correction et leur périmètre technique.
+
+Le moteur doit s'appuyer sur des règles déterministes, vérifiables et indépendantes de l'IA.
+
+Il doit classifier les solutions dans trois catégories :
+
+GSI-ONLY CONFIGURATION
+
+Corrections candidates concernant notamment :
+
+- Configurations système.
+- Ressources framework.
+- Overlays RRO.
+- Propriétés système.
+- Paramètres UDFPS configurables.
+- Ressources et déclarations compatibles avec la GSI.
+
+GSI-ONLY RUNTIME
+
+Corrections candidates concernant notamment :
+
+- Comportement du Framework.
+- Logique SystemUI.
+- Gestion des événements UDFPS.
+- Coordination des composants Android.
+- Compatibilité des interfaces exposées par la plateforme.
+
+HORS PÉRIMÈTRE GSI
+
+Problèmes nécessitant potentiellement une intervention sur :
+
+- Vendor.
+- ODM.
+- Kernel.
+- Firmware.
+- HAL propriétaire non compatible.
+- Pilote matériel.
+- Composant matériel.
+
+Chaque proposition doit comporter :
+
+- Anomalie d'origine.
+- Preuves disponibles.
+- Composant responsable présumé.
+- Emplacement réel du composant.
+- Dépendances.
+- Possibilité de correction côté GSI.
+- Prérequis techniques.
+- Risques de compatibilité.
+- Niveau de faisabilité.
+- Informations supplémentaires nécessaires.
+
+Ne jamais proposer une correction GSI simplement parce qu'un composant est absent ou inaccessible.
+
+3.6 AI ADVISOR — Assistant d'analyse facultatif
+
+Responsabilité : approfondir l'interprétation des résultats déjà produits par les moteurs déterministes.
+
+L'IA doit recevoir des données structurées comprenant :
+
+- Environnement matériel et logiciel.
+- Composants découverts.
+- Preuves vérifiées.
+- Anomalies détectées.
+- Corrélations.
+- Hypothèses.
+- Différences Custom ROM / GSI.
+- Solutions candidates.
+
+Elle doit pouvoir :
+
+- Expliquer les anomalies.
+- Examiner les relations entre composants.
+- Identifier les informations manquantes.
+- Évaluer les hypothèses.
+- Proposer des pistes d'investigation.
+- Expliquer les limites d'une correction GSI.
+- Approfondir les rapports comparatifs.
+
+L'IA ne doit jamais inventer des journaux, des propriétés, des interfaces ou des preuves.
+
+Elle ne doit jamais transformer une hypothèse en fait confirmé.
+
+Intégration prévue : Firebase AI Logic avec un modèle Gemini compatible, choisi et vérifié au moment de l'implémentation.
+
+Prévoir :
+
+- Activation facultative.
+- Appel manuel.
+- Niveau de réflexion élevé lorsque disponible.
+- Configuration Firebase séparée.
+- Firebase App Check en production.
+- Gestion des erreurs réseau.
+- Respect des quotas et de la facturation.
+- Consentement avant transmission des données.
+- Fonctionnement intégral du diagnostic hors ligne.
+
+Aucune clé API privée ne doit être intégrée dans le code source ou publiée sur GitHub.
+
+---
+
+4. FONCTIONNALITÉ DIAGNOSTIC
+
+4.1 PHASE 1 — COLD DIAGNOSTIC
+
+Objectif : obtenir une cartographie aussi complète que possible de l'environnement FOD sans déclencher d'opération biométrique.
+
+Le diagnostic doit analyser les domaines suivants.
+
+HARDWARE
+
+- Modèle de l'appareil.
+- SoC.
+- Fabricant.
+- Écran.
+- Technologie tactile.
+- Informations biométriques accessibles.
+- Caractéristiques UDFPS disponibles.
+
+FRAMEWORK
+
+- Services biométriques.
+- BiometricService.
+- UdfpsController.
+- Interfaces biométriques.
+- Ressources framework.
+- Configuration biométrique.
+
+SYSTEMUI
+
+- Packages concernés.
+- Ressources UDFPS.
+- Composants d'interface.
+- Configuration de l'icône.
+- Éléments de guidage biométrique.
+
+HAL / VENDOR
+
+- Services biométriques.
+- Interfaces AIDL/HIDL.
+- Bibliothèques natives.
+- Dépendances.
+- Implémentations constructeur accessibles.
+
+DISPLAY
+
+- HBM.
+- LHBM.
+- Dimlayer.
+- Backlight.
+- DRM.
+- Interfaces display.
+- Éléments de configuration associés.
+
+KERNEL / TOUCH
+
+- Drivers pertinents.
+- Nœuds sysfs.
+- Périphériques accessibles.
+- Interfaces tactiles.
+- Éléments de communication avec le capteur.
+
+OVERLAYS
+
+- Packages RRO.
+- Overlays actifs.
+- Ressources modifiées.
+- Configuration UDFPS.
+- Correspondance entre ressources et composants.
+
+SELINUX
+
+- Mode Enforcing ou Permissive.
+- Denials AVC accessibles.
+- Contextes consultables.
+- Restrictions affectant les sondes.
+
+PROPERTIES
+
+- Propriétés système.
+- Propriétés vendor.
+- Propriétés persistantes.
+- Propriétés biométriques.
+- Configuration display et tactile.
+
+Le moteur doit adapter ses sondes aux permissions réellement disponibles.
+
+Chaque domaine doit disposer de son propre état d'avancement et de son propre résultat.
+
+Résultat de la Phase 1
+
+Produire :
+
+- Cartographie des composants.
+- Liste des ressources découvertes.
+- Graphe des dépendances.
+- Preuves collectées.
+- Anomalies statiques.
+- Éléments inaccessibles.
+- Rapport synthétique.
+
+4.2 PHASE 2 — LIVE TRACER
+
+Objectif : observer le comportement réel du mécanisme FOD pendant un enrôlement biométrique.
+
+L'utilisateur lance l'observation depuis le diagnostic.
+
+Déroulement :
+
+1. Vérifier les permissions.
+2. Vérifier les sources observables.
+3. Préparer le collecteur.
+4. Démarrer le service au premier plan.
+5. Afficher une notification de suivi.
+6. Ouvrir l'écran système d'enrôlement.
+7. Collecter les événements accessibles.
+8. Détecter la fin ou l'interruption de la session.
+9. Finaliser les données.
+10. Produire la chronologie.
+
+Utiliser les Intent biométriques adaptés à la version Android, notamment ACTION_BIOMETRIC_ENROLL à partir d'Android 11, avec une stratégie de repli appropriée pour les versions et ROM qui ne prennent pas en charge le parcours attendu.
+
+Vérifier l'état biométrique après le retour dans l'application. Ne pas supposer que l'Intent fournit directement le résultat de l'enrôlement.
+
+SOURCES DE COLLECTE
+
+BIOMETRIC
+
+- Services biométriques.
+- Initialisation.
+- Communications HAL observables.
+- Erreurs et réponses disponibles.
+
+DISPLAY
+
+- Transitions HBM/LHBM.
+- Changements de luminosité.
+- États display.
+- Interfaces de contrôle accessibles.
+
+TOUCH / KERNEL
+
+- Événements tactiles accessibles.
+- Changements des interfaces sysfs.
+- Activité Kernel.
+- Messages d'erreur accessibles avec ROOT.
+
+SYSTEMUI / FRAMEWORK
+
+- Apparition de l'interface.
+- État du guidage.
+- Événements biométriques.
+- Logs pertinents.
+
+La capture doit être ciblée sur les sources découvertes pendant la Phase 1.
+
+Ne pas supposer que toutes les sources sont accessibles sur tous les appareils.
+
+Le ForegroundService doit utiliser un type de service réellement adapté à sa fonction, aux versions Android ciblées et aux règles de distribution applicables. Ne pas choisir automatiquement dataSync ou specialUse sans justification technique.
+
+Prévoir des buffers circulaires bornés, une gestion des interruptions, des délais, un arrêt propre et une notification explicite.
+
+CHRONOLOGIE NORMALISÉE
+
+Prévoir les types d'événements suivants :
+
+- SESSION_STARTED
+- ENROLLMENT_OPENED
+- BIOMETRIC_SERVICE_READY
+- UDFPS_UI_DISPLAYED
+- TOUCH_EVENT_OBSERVED
+- HBM_ENABLED
+- IMAGE_ACQUISITION
+- BIOMETRIC_PROCESSING
+- ENROLLMENT_PROGRESS
+- HBM_DISABLED
+- SESSION_COMPLETED
+- SESSION_FAILED
+- ERROR
+
+Ces événements représentent des catégories possibles. Ils ne doivent être enregistrés que lorsqu'une observation ou une déduction explicitement identifiée les justifie.
+
+Chaque événement doit posséder :
+
+- Timestamp monotone.
+- Source.
+- Données.
+- Identifiant de preuve.
+- Niveau de confiance.
+- Type d'observation.
+- Relation éventuelle avec les événements voisins.
+
+TABLEAU DE BORD DIAGNOSTIC
+
+Prévoir les sections :
+
+1. Vue générale.
+2. Cartographie des composants.
+3. Graphe des dépendances.
+4. Chronologie LIVE.
+5. Faits prouvés.
+6. Anomalies.
+7. Corrélations.
+8. Hypothèses.
+9. Ressources inaccessibles.
+10. Synthèse.
+
+---
+
+5. FONCTIONNALITÉ COMPARATEUR
+
+Objectif : identifier les divergences entre une Custom ROM fonctionnelle et une GSI présentant un dysfonctionnement FOD.
+
+L'utilisateur importe deux archives ZIP indépendantes.
+
+- ARCHIVE A : CUSTOM ROM.
+- ARCHIVE B : GSI.
+
+Le comparateur doit vérifier :
+
+- Version du schéma.
+- Intégrité des fichiers.
+- Compatibilité des données.
+- Identité matérielle déclarée.
+- Version Android.
+- Disponibilité des phases diagnostiques.
+- Sources réellement observées.
+- Complétude des rapports.
+
+Ne pas exiger une identité logicielle entre les deux systèmes, mais contrôler que la comparaison matérielle et les scénarios sont suffisamment comparables.
+
+5.1 COMPARAISON STRUCTURELLE
+
+Comparer :
+
+- Propriétés.
+- Services.
+- Interfaces HAL.
+- Bibliothèques.
+- Packages.
+- Overlays.
+- Ressources.
+- Nœuds sysfs.
+- Configurations.
+- Dépendances.
+
+5.2 COMPARAISON COMPORTEMENTALE
+
+Comparer :
+
+- Séquences d'enrôlement.
+- Initialisation biométrique.
+- Événements tactiles.
+- Transitions HBM.
+- Activité des services.
+- Temps de réponse.
+- Erreurs.
+- Interruptions.
+
+Utiliser des horodatages relatifs à la session et des règles de normalisation pour éviter les différences artificielles.
+
+5.3 CLASSIFICATION DES DIFFÉRENCES
+
+- IDENTICAL : éléments identiques.
+- DIFFERENT : différence observée.
+- MISSING : élément absent après vérification suffisante.
+- INACCESSIBLE : élément non vérifiable.
+- PARTIAL : comparaison incomplète.
+- INCOMPATIBLE : données non comparables.
+
+Distinguer les différences bénignes des divergences potentiellement critiques.
+
+Ne jamais assimiler automatiquement une divergence à une cause de panne.
+
+RAPPORT COMPARATIF
+
+Le rapport doit présenter :
+
+- Résumé général.
+- Compatibilité des archives.
+- Environnement comparé.
+- Composants communs.
+- Composants divergents.
+- Événements manquants ou différents.
+- Anomalies propres à chaque système.
+- Hypothèses de régression.
+- Éléments à examiner.
+- Niveau de confiance de chaque conclusion.
+
+---
+
+6. FONCTIONNALITÉ SOLUTIONS & IA
+
+Cette fonctionnalité exploite les rapports produits par DIAGNOSTIC et COMPARATEUR.
+
+Elle doit présenter les solutions candidates en trois catégories :
+
+1. GSI-ONLY CONFIGURATION.
+2. GSI-ONLY RUNTIME.
+3. HORS PÉRIMÈTRE GSI.
+
+Chaque solution doit être justifiée par des preuves et des dépendances techniques.
+
+ANALYSE DE FAISABILITÉ
+
+Pour chaque proposition, examiner :
+
+- Origine du composant.
+- Partition qui le fournit.
+- Présence dans la Custom ROM.
+- Présence dans la GSI.
+- Dépendances vendor.
+- Interfaces utilisées.
+- Compatibilité Android.
+- Possibilité de correction côté GSI.
+- Risques de régression.
+
+Le moteur doit pouvoir retourner :
+
+- POSSIBLE.
+- POSSIBLE_WITH_CONDITIONS.
+- NOT_SUPPORTED_BY_GSI.
+- INSUFFICIENT_EVIDENCE.
+- UNKNOWN.
+
+Aucune correction ne doit être considérée comme garantie sans validation.
+
+PROPOSITIONS DE SOLUTIONS
+
+Chaque proposition doit présenter :
+
+- Problème identifié.
+- Preuves.
+- Cause probable.
+- Emplacement concerné.
+- Catégorie de correction.
+- Faisabilité.
+- Dépendances.
+- Risques.
+- Méthode de validation.
+- Informations supplémentaires nécessaires.
+
+FodTracer ne doit pas injecter automatiquement les modifications proposées.
+
+Il doit produire des recommandations techniques exploitables par un développeur GSI.
+
+---
+
+7. FONCTIONNALITÉ ARCHIVES & EXPORT
+
+Créer un système de stockage structuré et indépendant de l'interface.
+
+Emplacement public souhaité :
+
+/sdcard/FODtracer/
+
+Organisation :
+
+FODtracer/
+
+- diagnostics/
+- comparisons/
+- exports/
+
+Chaque session doit posséder son propre identifiant et son propre répertoire.
+
+Structure d'un rapport :
+
+SESSION_ID/
+
+- manifest.json
+- environment.json
+- discovery.json
+- components.json
+- dependencies.json
+- evidence.json
+- timeline.json
+- anomalies.json
+- hypotheses.json
+- solutions.json
+- raw/
+
+Les fichiers raw sont facultatifs et ne doivent contenir que les données effectivement collectées.
+
+FORMAT DES ARCHIVES
+
+Utiliser un format ZIP versionné.
+
+Prévoir :
+
+- schemaVersion.
+- Identifiant unique.
+- Métadonnées.
+- Informations environnementales.
+- Résultats des sondes.
+- Preuves.
+- Chronologie.
+- Anomalies.
+- Synthèse.
+- Sommes SHA-256.
+
+À l'import :
+
+- Vérifier le manifeste.
+- Vérifier les sommes SHA-256.
+- Vérifier les chemins.
+- Prévenir Zip-Slip.
+- Détecter les entrées dupliquées.
+- Limiter la taille décompressée.
+- Prévenir les ZIP bombs.
+- Vérifier la version du schéma.
+- Rejeter les archives invalides.
+
+Les rapports doivent pouvoir être importés sur une autre installation de FodTracer.
+
+ANONYMISATION
+
+Prévoir une option avant export permettant de masquer les données sensibles :
+
+- Numéro de série.
+- IMEI.
+- Adresses MAC.
+- Identifiants personnels.
+- Identifiants de session non nécessaires au partage.
+
+Conserver les informations techniques indispensables à la comparaison.
+
+Ne jamais modifier silencieusement le rapport original.
+
+---
+
+8. INFRASTRUCTURE ET SÉCURITÉ
+
+8.1 GESTION ROOT
+
+Créer un PrivilegeManager indépendant.
+
+Fonctions :
+
+- Détection de la disponibilité de su.
+- Demande d'autorisation.
+- Test réel de l'élévation.
+- Identification du contexte d'exécution.
+- Vérification des possibilités de lecture.
+- Gestion des refus.
+- Affichage du statut ROOT.
+
+Ne jamais supposer que ROOT est disponible simplement parce qu'un gestionnaire ROOT est installé.
+
+8.2 SHELL EXECUTOR
+
+Créer un moteur d'exécution sécurisé.
+
+Règles obligatoires :
+
+- Commandes prédéfinies et contrôlées.
+- Aucun assemblage de commandes à partir de données non fiables.
+- Préférence pour l'exécution directe de processus plutôt que l'interprétation shell.
+- Délais d'exécution.
+- Limites de sortie.
+- Gestion stdout/stderr.
+- Annulation.
+- Journalisation.
+- Gestion des erreurs.
+
+Interdire les commandes destructrices et les écritures sur les partitions système.
+
+Le fonctionnement ROOT doit rester strictement orienté lecture et observation.
+
+8.3 SELINUX
+
+Détecter le mode SELinux et les restrictions pertinentes.
+
+Ne jamais désactiver SELinux.
+
+Ne jamais modifier les politiques.
+
+Ne jamais passer automatiquement en mode Permissive.
+
+8.4 STOCKAGE
+
+Utiliser en priorité le stockage privé pour les données temporaires et les sessions de travail.
+
+Privilégier Storage Access Framework pour l'import/export et la sélection d'un dossier public.
+
+Prévoir MANAGE_EXTERNAL_STORAGE uniquement comme option avancée lorsque son utilisation est réellement nécessaire et autorisée.
+
+L'absence de cette permission ne doit pas empêcher le fonctionnement principal de FodTracer.
+
+---
+
+9. ARCHITECTURE ANDROID ET ORGANISATION DU CODE
+
+Utiliser une architecture modulaire avec séparation stricte entre interface, logique métier et accès système.
+
+Technologies recommandées :
+
+- Kotlin.
+- Jetpack Compose.
+- Material 3.
+- Coroutines.
+- StateFlow.
+- ViewModel.
+- Room.
+- DataStore.
+- Kotlin Serialization.
+- WorkManager pour les tâches compatibles avec son fonctionnement.
+- ForegroundService pour l'observation en direct lorsque nécessaire.
+
+Organisation indicative :
+
+com.fodtracer/
+
+- app/
+  - navigation/
+  - screens/
+  - components/
+  - theme/
+- presentation/
+  - diagnostic/
+  - comparator/
+  - solutions/
+  - archives/
+  - settings/
+- domain/
+  - models/
+  - usecases/
+  - interfaces/
+- core/
+  - probe/
+  - evidence/
+  - correlation/
+  - anomaly/
+  - solution/
+  - ai/
+- data/
+  - database/
+  - repositories/
+  - serialization/
+  - archives/
+- system/
+  - shell/
+  - root/
+  - selinux/
+  - biometrics/
+  - display/
+  - kernel/
+  - permissions/
+- workers/
+  - diagnostic/
+  - live/
+
+Les modules doivent communiquer par des interfaces définies.
+
+Aucun ViewModel ne doit exécuter directement une commande ROOT ou accéder directement aux interfaces Kernel.
+
+Aucune logique métier ne doit dépendre directement de Jetpack Compose.
+
+Les moteurs doivent pouvoir être testés indépendamment de l'interface graphique.
+
+---
+
+10. INTERFACE UTILISATEUR ET DESIGN
+
+DIRECTION VISUELLE
+
+Créer une interface épurée de type laboratoire technique.
+
+Principes :
+
+- Material 3.
+- Minimalisme.
+- Espaces généreux.
+- Hiérarchie visuelle claire.
+- Animations fluides.
+- Aucune surcharge descriptive.
+- Informations techniques présentées uniquement lorsque pertinentes.
+
+ACCUEIL
+
+Afficher :
+
+- Nom FodTracer.
+- Modèle de l'appareil.
+- Version Android.
+- État ROOT.
+- État SELinux.
+- État du stockage.
+- Accès Paramètres.
+
+Les fonctionnalités sont présentées horizontalement.
+
+Chaque nouvelle fonctionnalité future doit pouvoir être ajoutée sans restructurer l'écran d'accueil.
+
+THÈMES
+
+Thème clair par défaut : Laboratoire.
+
+- Fond : #F7F9FC
+- Surface : #FFFFFF
+- Bordure : #E2E8F0
+- Primaire : #0F4C81
+- Accent : #0D9488
+
+Thème sombre : Technique.
+
+- Fond : #0B0F17
+- Surface : #131A26
+- Bordure : #232E42
+- Primaire : #60A5FA
+- Accent : #2DD4BF
+
+Prévoir les états sémantiques et des indicateurs de preuve cohérents.
+
+TYPOGRAPHIE
+
+- Space Grotesk : titres.
+- Inter : textes.
+- JetBrains Mono : logs, propriétés, chemins et données techniques.
+
+Les polices doivent être intégrées localement.
+
+LANGUES
+
+Français et anglais.
+
+Détection automatique de la langue système avec possibilité de changement dans les paramètres.
+
+---
+
+11. MODÈLES DE DONNÉES
+
+Créer des modèles indépendants et versionnés.
+
+Modèles principaux :
+
+- DeviceEnvironment
+- DiagnosticSession
+- ProbeResult
+- DiscoveredComponent
+- DependencyLink
+- EvidenceRecord
+- TimelineEvent
+- CorrelationResult
+- AnomalyRecord
+- HypothesisRecord
+- SolutionProposal
+- ComparisonReport
+- ArchiveManifest
+- AIAnalysis
+
+Chaque modèle doit avoir des responsabilités clairement définies.
+
+Ne pas stocker une même information de manière contradictoire dans plusieurs fichiers.
+
+Les identifiants doivent être stables à l'intérieur d'une session.
+
+Les horodatages doivent distinguer le temps monotone utilisé pour mesurer les événements et les dates civiles utilisées pour afficher les rapports.
+
+---
+
+12. TESTS ET VALIDATION
+
+La fiabilité du moteur est prioritaire sur le nombre de fonctionnalités.
+
+Prévoir plusieurs niveaux de tests.
+
+TESTS UNITAIRES
+
+- Chaque sonde.
+- Normalisation des résultats.
+- Classification des preuves.
+- Corrélation.
+- Détection d'anomalies.
+- Règles de solutions.
+- Comparaison.
+- Sérialisation.
+
+TESTS DE SÉCURITÉ
+
+- Commandes refusées.
+- Timeout.
+- Sorties trop volumineuses.
+- Archives malformées.
+- Zip-Slip.
+- ZIP bombs.
+- Données sensibles.
+- Refus ROOT.
+- Accès SELinux bloqué.
+
+TESTS ANDROID RÉELS
+
+Tester sur plusieurs appareils et versions Android :
+
+- Sans ROOT.
+- Avec ROOT.
+- SELinux Enforcing.
+- Différentes implémentations HAL.
+- Différentes technologies UDFPS.
+- Différentes implémentations HBM.
+- Custom ROM.
+- GSI.
+
+Prévoir des rapports de référence pour tester le comparateur sans dépendre d'un appareil physique à chaque exécution.
+
+CRITÈRES DE VALIDATION
+
+Une fonctionnalité ne doit pas être considérée comme terminée uniquement parce qu'elle compile.
+
+Elle doit respecter ses critères fonctionnels, ses critères de sécurité et ses tests de non-régression.
+
+---
+
+13. GITHUB ET COMPILATION
+
+Préparer un dépôt propre et reproductible.
+
+Prévoir :
+
+- Gradle Wrapper versionné.
+- Version Gradle compatible avec la version AGP choisie.
+- JDK compatible.
+- Dépendances versionnées.
+- Configuration des builds Debug et Release.
+- Fichier .gitignore.
+- Aucune clé privée.
+- Aucun keystore personnel.
+- Aucun secret Firebase publié.
+
+GitHub Actions doit exécuter :
+
+1. Vérification de l'environnement.
+2. Compilation.
+3. Tests unitaires.
+4. Tests de sérialisation et d'archives.
+5. Vérification statique.
+6. Production de l'APK Debug.
+7. Publication de l'APK comme artifact.
+
+Le build doit rester possible sans configuration Firebase.
+
+L'absence de google-services.json doit désactiver proprement l'IA sans empêcher la compilation ni le fonctionnement des autres fonctionnalités.
+
+Ne pas utiliser une option Gradle inventée ou non documentée pour contourner l'absence de configuration Firebase.
+
+---
+
+14. ORDRE OBLIGATOIRE D'IMPLÉMENTATION
+
+Développer le projet dans cet ordre :
+
+ÉTAPE 1 — FONDATIONS
+
+Architecture Android, modèles, stockage privé, permissions, gestion ROOT, ShellExecutor et système de journaux.
+
+Validation : application fonctionnelle avec et sans ROOT.
+
+ÉTAPE 2 — PROBE ENGINE
+
+Développer les sondes indépendantes et la découverte adaptative.
+
+Validation : production d'un rapport statique exploitable.
+
+ÉTAPE 3 — EVIDENCE ENGINE
+
+Développer la traçabilité, la classification des preuves et les états d'accessibilité.
+
+Validation : aucune donnée inaccessible n'est interprétée comme inexistante.
+
+ÉTAPE 4 — LIVE TRACER
+
+Développer le service d'observation, les collecteurs et la chronologie.
+
+Validation : capture réelle d'un enrôlement avec sources et événements identifiés.
+
+ÉTAPE 5 — CORRELATION ENGINE
+
+Développer les relations entre composants et événements.
+
+Validation : corrélations reproductibles.
+
+ÉTAPE 6 — ANOMALY ENGINE
+
+Développer les règles de détection et la justification des anomalies.
+
+Validation : chaque anomalie possède des preuves associées ou est explicitement classée comme hypothèse.
+
+ÉTAPE 7 — COMPARATOR ENGINE
+
+Développer l'import des archives, la normalisation et la comparaison structurelle et comportementale.
+
+Validation : identification correcte des différences et des données non comparables.
+
+ÉTAPE 8 — SOLUTION ENGINE
+
+Développer les règles de classification et les propositions de correction GSI.
+
+Validation : chaque proposition est justifiée, vérifiable et accompagnée de ses limites.
+
+ÉTAPE 9 — AI ADVISOR
+
+Intégrer l'analyse IA facultative.
+
+Validation : aucune invention de preuves et fonctionnement complet sans IA.
+
+ÉTAPE 10 — FINALISATION
+
+Finaliser l'interface, les archives, les paramètres, l'export et les tests sur appareils réels.
+
+---
+
+15. DIRECTIVES FINALES POUR L'IMPLÉMENTATION
+
+Construire FodTracer comme un véritable logiciel d'investigation technique, et non comme une simple interface exécutant quelques commandes Android.
+
+Privilégier la profondeur technique, la cohérence des moteurs et la richesse des données collectées plutôt que la multiplication de fonctionnalités superficielles.
+
+Chaque moteur doit être indépendant, extensible, testable et documenté.
+
+Ne pas hardcoder une implémentation propre à un constructeur.
+
+Ne pas considérer que tous les appareils utilisent les mêmes chemins sysfs, les mêmes interfaces HAL ou le même mécanisme HBM.
+
+Ne pas confondre absence, inaccessibilité et absence d'observation.
+
+Ne pas produire de conclusion sans justification.
+
+Ne pas laisser l'IA remplacer les règles déterministes.
+
+Ne pas modifier le système.
+
+Ne pas implémenter artificiellement des fonctionnalités dont les sources nécessaires ne sont pas accessibles.
+
+Lorsqu'une fonctionnalité est limitée par Android, SELinux, les permissions ou le constructeur, identifier précisément cette limite et prévoir un comportement dégradé explicite.
+
+PRIORITÉ ABSOLUE : FIABILITÉ, TRAÇABILITÉ, PRÉCISION ET REPRODUCTIBILITÉ.
+
+Le résultat attendu est une application capable de reconstituer aussi précisément que possible la chaîne complète du mécanisme FOD, de détecter les ruptures réellement observables et d'aider un développeur à identifier les corrections techniquement envisageables côté GSI.
+
+L'application doit rester entièrement exploitable pour le diagnostic, la comparaison et l'investigation même sans ROOT, sans connexion Internet et sans configuration IA.

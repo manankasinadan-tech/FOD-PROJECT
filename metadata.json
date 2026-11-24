@@ -1,0 +1,6 @@
+{
+  "name": "FodTracer",
+  "description": "Android native FOD/UDFPS diagnostic, live enrollment tracer, Custom ROM vs GSI comparator, and GSI-only solution analyzer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

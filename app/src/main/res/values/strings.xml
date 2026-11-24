@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">FodTracer</string>
+    <string name="live_tracer_channel_name">FOD Live Tracer</string>
+    <string name="live_tracer_channel_desc">Observes FOD/UDFPS telemetry during system biometric enrollment.</string>
+    <string name="live_tracer_notif_title">FodTracer Live Observation Active</string>
+    <string name="live_tracer_notif_text">Recording targeted biometric, display HBM, and touch signals.</string>
+    <string name="live_tracer_stop_action">Stop</string>
+</resources>
