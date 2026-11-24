@@ -2,6 +2,7 @@ package com.example.fodtracer.data.database
 
 import android.content.Context
 import androidx.room.*
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "diagnostic_sessions")
@@ -68,7 +69,19 @@ abstract class FodDatabase : RoomDatabase() {
                     context.applicationContext,
                     FodDatabase::class.java,
                     "fodtracer.db"
-                ).build().also { INSTANCE = it }
+                )
+                    .addCallback(object : Callback() {
+                        override fun onOpen(db: SupportSQLiteDatabase) {
+                            super.onOpen(db)
+                            // Guard against Android SQLite CursorWindow (~2MB) crashes caused by
+                            // previously persisted oversized rows. Runs inside SQLite before any query.
+                            runCatching {
+                                db.execSQL("DELETE FROM diagnostic_sessions WHERE length(CAST(payloadJson AS BLOB)) > 1200000")
+                                db.execSQL("DELETE FROM comparison_reports WHERE length(CAST(payloadJson AS BLOB)) > 1200000")
+                            }
+                        }
+                    })
+                    .build().also { INSTANCE = it }
             }
         }
     }

@@ -427,6 +427,55 @@ class FodEnginesAndSecurityTest {
         assertFalse(halStage.verifiedInLiveTrace)
     }
 
+    @Test
+    fun `BinaryXmlAndArscDecoder safely rejects malformed overflow offsets without crashing`() {
+        val corruptedArsc = ByteBuffer.allocate(64).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0002.toShort()) // CHUNK_TABLE
+            putShort(12.toShort())
+            putInt(64)
+            putInt(1)
+            putShort(0x0200.toShort()) // CHUNK_TABLE_PACKAGE
+            putShort(28.toShort())
+            putInt(52)
+        }.array()
+        val entries = BinaryXmlAndArscDecoder.extractArscEntries(corruptedArsc)
+        assertTrue(entries.isEmpty())
+
+        val xmlBad = ByteBuffer.allocate(32).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(0x0003.toShort()) // CHUNK_XML
+            putShort(8.toShort())
+            putInt(32)
+            putShort(0x0102.toShort())
+            putShort(16.toShort())
+            putInt(Int.MAX_VALUE) // malformed huge chunkSize
+        }.array()
+        assertNull(BinaryXmlAndArscDecoder.decodeBinaryXml(xmlBad))
+    }
+
+    @Test
+    fun `MarkdownReportExporter writeMarkdown resolves raw disassembly from disk resolver when stripped from memory`() {
+        val baseline = ReferenceBaselineFixtures.createWorkingCustomRomBaseline()
+        val artifact = DisassembledArtifact(
+            id = "DIS-ELF-001",
+            name = "fingerprint.fod.so",
+            path = "/vendor/lib64/hw/fingerprint.fod.so",
+            partition = PartitionOrigin.VENDOR,
+            kind = ArtifactKind.ELF_SHARED_LIB,
+            rawFileName = "disassembly/fp_fod.asm.txt",
+            disassemblySnippet = "snippet"
+        )
+        val strippedSession = baseline.copy(
+            disassembledArtifacts = listOf(artifact),
+            rawArtifacts = emptyMap()
+        )
+        val sw = java.io.StringWriter()
+        MarkdownReportExporter.writeMarkdown(strippedSession, sw) { key ->
+            if (key == "disassembly/fp_fod.asm.txt") "full_disk_asm_listing_token" else null
+        }
+        val rendered = sw.toString()
+        assertTrue(rendered.contains("full_disk_asm_listing_token"))
+    }
+
     private fun buildSyntheticAarch64Elf(): ByteArray {
         val dynStr = "\u0000libgoodix_fod.so\u0000enable_hbm_fod\u0000"
         val libNameOff = 1

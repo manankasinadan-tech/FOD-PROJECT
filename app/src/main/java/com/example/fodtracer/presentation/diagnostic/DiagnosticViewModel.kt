@@ -87,9 +87,13 @@ class DiagnosticViewModel(
 
     init {
         viewModelScope.launch {
-            val existing = repository.sessions.firstOrNull()?.firstOrNull()
-            if (existing != null && repository.activeSession.value == null) {
-                repository.setActiveSession(existing.sessionId)
+            try {
+                val existing = repository.sessions.firstOrNull()?.firstOrNull()
+                if (existing != null && repository.activeSession.value == null) {
+                    repository.setActiveSession(existing.sessionId)
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
             }
         }
     }
@@ -118,10 +122,10 @@ class DiagnosticViewModel(
                         _statusMessage.value = "MD auto-saved: ${session.sessionId}.md"
                     }
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _coldState.value = ColdRunUiState.Error(e.localizedMessage ?: "Cold diagnostic failed.")
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is OutOfMemoryError) System.gc()
+                _coldState.value = ColdRunUiState.Error(t.localizedMessage ?: t::class.java.simpleName)
             }
         }
     }
@@ -150,10 +154,10 @@ class DiagnosticViewModel(
                 val updated = finalizeLiveTraceUseCase(base, liveData, liveEvidence)
                 _selectedSection.value = DashboardSection.DISASSEMBLY
                 _statusMessage.value = "Live correlated & MD updated: ${updated.sessionId}.md"
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _statusMessage.value = e.localizedMessage ?: "Failed to finalize live trace."
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is OutOfMemoryError) System.gc()
+                _statusMessage.value = t.localizedMessage ?: "Failed to finalize live trace."
             }
         }
     }
@@ -161,13 +165,18 @@ class DiagnosticViewModel(
     fun exportMarkdown(anonymize: Boolean = anonymizeByDefault.value, destinationUri: Uri? = null) {
         val session = activeSession.value ?: return
         viewModelScope.launch {
-            archiveRepository.exportDiagnosticMarkdown(session, anonymize, destinationUri)
-                .onSuccess { path ->
-                    _statusMessage.value = "Exported MD: $path"
-                }
-                .onFailure { err ->
-                    _statusMessage.value = "MD export failed: ${err.localizedMessage}"
-                }
+            try {
+                archiveRepository.exportDiagnosticMarkdown(session, anonymize, destinationUri)
+                    .onSuccess { path ->
+                        _statusMessage.value = "Exported MD: $path"
+                    }
+                    .onFailure { err ->
+                        _statusMessage.value = "MD export failed: ${err.localizedMessage}"
+                    }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _statusMessage.value = "MD export failed: ${t.localizedMessage}"
+            }
         }
     }
 
@@ -184,17 +193,22 @@ class DiagnosticViewModel(
         val session = activeSession.value ?: return
         viewModelScope.launch {
             _aiState.value = AiUiState.Loading
-            val res = aiAdvisorService.analyzeDiagnostic(session)
-            res.onSuccess { analysis ->
-                val updated = session.copy(
-                    updatedAtCivilMs = System.currentTimeMillis(),
-                    aiAnalysis = analysis
-                )
-                repository.saveSession(updated)
-                _aiState.value = AiUiState.Ready
-                _selectedSection.value = DashboardSection.SYNTHESIS
-            }.onFailure { err ->
-                _aiState.value = AiUiState.Error(err.localizedMessage ?: "AI analysis failed.")
+            try {
+                val res = aiAdvisorService.analyzeDiagnostic(session)
+                res.onSuccess { analysis ->
+                    val updated = session.copy(
+                        updatedAtCivilMs = System.currentTimeMillis(),
+                        aiAnalysis = analysis
+                    )
+                    repository.saveSession(updated)
+                    _aiState.value = AiUiState.Ready
+                    _selectedSection.value = DashboardSection.SYNTHESIS
+                }.onFailure { err ->
+                    _aiState.value = AiUiState.Error(err.localizedMessage ?: "AI analysis failed.")
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _aiState.value = AiUiState.Error(t.localizedMessage ?: "AI analysis failed.")
             }
         }
     }

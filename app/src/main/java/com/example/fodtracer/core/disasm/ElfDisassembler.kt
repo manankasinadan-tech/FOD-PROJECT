@@ -148,9 +148,11 @@ object ElfDisassembler {
                 if (targetFns.isNotEmpty()) {
                     appendLine("\n[AArch64 Disassembly (.text) — ${targetFns.size} functions]")
                     for (fn in targetFns) {
+                        if (length > 100_000) break
                         val relOffset = fn.value - textSec.addr
-                        val filePos = (textSec.offset + relOffset).toInt()
-                        if (filePos < 0 || filePos + 4 > bytes.size) continue
+                        val filePosLong = textSec.offset + relOffset
+                        if (filePosLong < 0L || filePosLong + 4L > bytes.size.toLong()) continue
+                        val filePos = filePosLong.toInt()
                         val maxBytesToDecode = if (fn.size in 4..1024) fn.size.toInt() else 256
                         val instrCount = (maxBytesToDecode / 4).coerceIn(4, 160)
                         appendLine("\n<${fn.name}> @ 0x${fn.value.toString(16)}:")
@@ -159,8 +161,9 @@ object ElfDisassembler {
                         val fnStrings = linkedSetOf<String>()
 
                         for (i in 0 until instrCount) {
-                            val off = filePos + i * 4
-                            if (off + 4 > bytes.size) break
+                            val offLong = filePosLong + i * 4L
+                            if (offLong < 0L || offLong + 4L > bytes.size.toLong()) break
+                            val off = offLong.toInt()
                             val word = buf.getInt(off)
                             val pc = fn.value + i * 4L
                             val decoded = decodeAarch64(word, pc, adrpPages, rodataMap, symbolByAddr, fnCalls, fnStrings)
@@ -242,9 +245,11 @@ object ElfDisassembler {
             val entSize = if (sec.entSize > 0) sec.entSize.toInt() else {
                 if (is64) (if (isRela) 24 else 16) else (if (isRela) 12 else 8)
             }
-            val start = sec.offset.toInt()
-            val end = (sec.offset + sec.size).coerceAtMost(fileLen.toLong()).toInt()
-            if (start < 0 || start >= end) continue
+            val startLong = sec.offset
+            val endLong = (sec.offset + sec.size).coerceAtMost(fileLen.toLong())
+            if (startLong < 0L || startLong >= endLong || startLong > Int.MAX_VALUE) continue
+            val start = startLong.toInt()
+            val end = endLong.toInt()
 
             var pos = start
             while (pos + entSize <= end && gotMap.size < 4000) {
@@ -462,8 +467,8 @@ object ElfDisassembler {
     }
 
     private fun indexRodataStrings(bytes: ByteArray, rodata: ElfSection?): Map<Long, String> {
-        if (rodata == null) return emptyMap()
-        val start = rodata.offset.toInt().coerceIn(0, bytes.size)
+        if (rodata == null || rodata.offset < 0L || rodata.size <= 0L) return emptyMap()
+        val start = rodata.offset.coerceIn(0L, bytes.size.toLong()).toInt()
         val end = (rodata.offset + rodata.size).coerceAtMost(bytes.size.toLong()).toInt()
         val map = HashMap<Long, String>()
         var strStart = -1
@@ -476,6 +481,7 @@ object ElfDisassembler {
                     val s = String(bytes, strStart, i - strStart, StandardCharsets.US_ASCII)
                     val vaddr = rodata.addr + (strStart - rodata.offset)
                     map[vaddr] = s
+                    if (map.size >= 20_000) break
                 }
                 strStart = -1
             }

@@ -50,9 +50,8 @@ object BinaryXmlAndArscDecoder {
 
         while (pos + 8 <= totalSize && elementsDecoded < 600) {
             val type = buf.getShort(pos).toInt() and 0xFFFF
-            val headerSize = buf.getShort(pos + 2).toInt() and 0xFFFF
             val chunkSize = buf.getInt(pos + 4)
-            if (chunkSize < 8 || pos + chunkSize > totalSize) break
+            if (chunkSize < 8 || pos.toLong() + chunkSize.toLong() > totalSize.toLong()) break
 
             when (type) {
                 CHUNK_STRING_POOL -> {
@@ -71,21 +70,25 @@ object BinaryXmlAndArscDecoder {
 
                         val indent = "  ".repeat(depth.coerceIn(0, 8))
                         out.append("$indent<$tagName")
-                        val attrsBase = pos + 16 + attrStart
-                        for (a in 0 until attrCount) {
-                            val aOff = attrsBase + a * attrSize
-                            if (aOff + 20 > pos + chunkSize) break
-                            val attrNameIdx = buf.getInt(aOff + 4)
-                            val rawValueIdx = buf.getInt(aOff + 8)
-                            val valueType = bytes[aOff + 15].toInt() and 0xFF
-                            val valueData = buf.getInt(aOff + 16)
-                            val attrName = strings.getOrElse(attrNameIdx) { "attr_$attrNameIdx" }
-                            val renderedVal = if (rawValueIdx in strings.indices && valueType == 0x03) {
-                                strings[rawValueIdx]
-                            } else {
-                                formatTypedValue(valueType, valueData, strings)
+                        val attrsBaseLong = pos.toLong() + 16L + attrStart.toLong()
+                        val chunkEndLong = pos.toLong() + chunkSize.toLong()
+                        if (attrsBaseLong in pos.toLong()..chunkEndLong) {
+                            for (a in 0 until attrCount) {
+                                val aOffLong = attrsBaseLong + a.toLong() * attrSize.toLong()
+                                if (aOffLong < 0L || aOffLong + 20L > chunkEndLong) break
+                                val aOff = aOffLong.toInt()
+                                val attrNameIdx = buf.getInt(aOff + 4)
+                                val rawValueIdx = buf.getInt(aOff + 8)
+                                val valueType = bytes[aOff + 15].toInt() and 0xFF
+                                val valueData = buf.getInt(aOff + 16)
+                                val attrName = strings.getOrElse(attrNameIdx) { "attr_$attrNameIdx" }
+                                val renderedVal = if (rawValueIdx in strings.indices && valueType == 0x03) {
+                                    strings[rawValueIdx]
+                                } else {
+                                    formatTypedValue(valueType, valueData, strings)
+                                }
+                                out.append(" $attrName=\"$renderedVal\"")
                             }
-                            out.append(" $attrName=\"$renderedVal\"")
                         }
                         out.appendLine(">")
                         depth++
@@ -111,11 +114,11 @@ object BinaryXmlAndArscDecoder {
     /**
      * Parses resources.arsc and extracts exact typed FOD/UDFPS/Biometric/HBM/Overlay entries.
      */
-    fun extractArscEntries(bytes: ByteArray, filterFodOnly: Boolean = true): List<String> {
-        if (bytes.size < 24) return emptyList()
+    fun extractArscEntries(bytes: ByteArray, filterFodOnly: Boolean = true): List<String> = runCatching {
+        if (bytes.size < 24) return@runCatching emptyList()
         val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val rootType = buf.getShort(0).toInt() and 0xFFFF
-        if (rootType != CHUNK_TABLE) return emptyList()
+        if (rootType != CHUNK_TABLE) return@runCatching emptyList()
 
         val rootHeaderSize = buf.getShort(2).toInt() and 0xFFFF
         val totalSize = buf.getInt(4).coerceIn(0, bytes.size)
@@ -128,7 +131,7 @@ object BinaryXmlAndArscDecoder {
             val type = buf.getShort(pos).toInt() and 0xFFFF
             val headerSize = buf.getShort(pos + 2).toInt() and 0xFFFF
             val chunkSize = buf.getInt(pos + 4)
-            if (chunkSize < 8 || pos + chunkSize > totalSize) break
+            if (chunkSize < 8 || pos.toLong() + chunkSize.toLong() > totalSize.toLong()) break
 
             when (type) {
                 CHUNK_STRING_POOL -> {
@@ -151,8 +154,8 @@ object BinaryXmlAndArscDecoder {
             }
             pos += chunkSize
         }
-        return results.toList()
-    }
+        results.toList()
+    }.getOrDefault(emptyList())
 
     private fun parsePackageChunk(
         bytes: ByteArray,
@@ -164,23 +167,25 @@ object BinaryXmlAndArscDecoder {
         filterFodOnly: Boolean,
         out: MutableSet<String>
     ) {
-        val pkgEnd = (pkgStart + pkgSize).coerceAtMost(bytes.size)
+        val pkgEnd = (pkgStart.toLong() + pkgSize.toLong()).coerceAtMost(bytes.size.toLong()).toInt()
         if (pkgStart + 280 > pkgEnd) return
-        val typeStringsRel = buf.getInt(pkgStart + 268)
-        val keyStringsRel = buf.getInt(pkgStart + 276)
+        val typeStringsRel = buf.getInt(pkgStart + 268).toLong() and 0xFFFFFFFFL
+        val keyStringsRel = buf.getInt(pkgStart + 276).toLong() and 0xFFFFFFFFL
 
-        val typeStrings = if (typeStringsRel > 0 && pkgStart + typeStringsRel + 8 < pkgEnd) {
-            val tsPos = pkgStart + typeStringsRel
+        val tsPosLong = pkgStart.toLong() + typeStringsRel
+        val typeStrings = if (typeStringsRel > 0L && tsPosLong + 8L < pkgEnd.toLong()) {
+            val tsPos = tsPosLong.toInt()
             val tsSize = buf.getInt(tsPos + 4)
-            if (tsSize >= 8 && tsPos + tsSize <= pkgEnd) {
+            if (tsSize >= 8 && tsPosLong + tsSize.toLong() <= pkgEnd.toLong()) {
                 parseStringPool(bytes, buf, tsPos, tsSize)
             } else emptyList()
         } else emptyList()
 
-        val keyStrings = if (keyStringsRel > 0 && pkgStart + keyStringsRel + 8 < pkgEnd) {
-            val ksPos = pkgStart + keyStringsRel
+        val ksPosLong = pkgStart.toLong() + keyStringsRel
+        val keyStrings = if (keyStringsRel > 0L && ksPosLong + 8L < pkgEnd.toLong()) {
+            val ksPos = ksPosLong.toInt()
             val ksSize = buf.getInt(ksPos + 4)
-            if (ksSize >= 8 && ksPos + ksSize <= pkgEnd) {
+            if (ksSize >= 8 && ksPosLong + ksSize.toLong() <= pkgEnd.toLong()) {
                 parseStringPool(bytes, buf, ksPos, ksSize)
             } else emptyList()
         } else emptyList()
@@ -190,7 +195,7 @@ object BinaryXmlAndArscDecoder {
             val chunkType = buf.getShort(pos).toInt() and 0xFFFF
             val chunkHeaderSize = buf.getShort(pos + 2).toInt() and 0xFFFF
             val chunkSize = buf.getInt(pos + 4)
-            if (chunkSize < 8 || pos + chunkSize > pkgEnd) break
+            if (chunkSize < 8 || pos.toLong() + chunkSize.toLong() > pkgEnd.toLong()) break
 
             if (chunkType == CHUNK_TABLE_TYPE && pos + 20 <= pkgEnd) {
                 parseTypeChunk(
@@ -222,13 +227,14 @@ object BinaryXmlAndArscDecoder {
         filterFodOnly: Boolean,
         out: MutableSet<String>
     ) {
-        val chunkEnd = (typePos + chunkSize).coerceAtMost(bytes.size)
+        val chunkEnd = (typePos.toLong() + chunkSize.toLong()).coerceAtMost(bytes.size.toLong()).toInt()
         val typeId = bytes[typePos + 8].toInt() and 0xFF
         val flags = bytes[typePos + 9].toInt() and 0xFF
         val entryCount = buf.getInt(typePos + 12).coerceIn(0, 30_000)
-        val entriesStartRel = buf.getInt(typePos + 16)
-        val entriesBase = typePos + entriesStartRel
-        if (entriesBase > chunkEnd) return
+        val entriesStartRel = buf.getInt(typePos + 16).toLong() and 0xFFFFFFFFL
+        val entriesBaseLong = typePos.toLong() + entriesStartRel
+        if (entriesStartRel < headerSize.toLong() || entriesBaseLong > chunkEnd.toLong()) return
+        val entriesBase = entriesBaseLong.toInt()
 
         val typeName = typeStrings.getOrElse(typeId - 1) { "type_$typeId" }
         val isSparse = (flags and 0x01) != 0
@@ -236,23 +242,26 @@ object BinaryXmlAndArscDecoder {
 
         for (i in 0 until entryCount) {
             if (out.size >= 250) break
-            val entryOffset: Int
+            val entryOffset: Long
             if (isSparse) {
                 val pairOff = offsetsStart + i * 4
-                if (pairOff + 4 > entriesBase) break
+                if (pairOff < typePos || pairOff + 4 > entriesBase) break
                 val rawOff16 = buf.getShort(pairOff + 2).toInt() and 0xFFFF
                 if (rawOff16 == 0xFFFF) continue
-                entryOffset = rawOff16 * 4
+                entryOffset = rawOff16.toLong() * 4L
             } else {
                 val offPos = offsetsStart + i * 4
-                if (offPos + 4 > entriesBase) break
-                entryOffset = buf.getInt(offPos)
-                if (entryOffset == -1) continue
+                if (offPos < typePos || offPos + 4 > entriesBase) break
+                val rawOff = buf.getInt(offPos)
+                if (rawOff == -1) continue
+                entryOffset = rawOff.toLong() and 0xFFFFFFFFL
             }
 
-            val ePos = entriesBase + entryOffset
-            if (ePos + 8 > chunkEnd) continue
+            val ePosLong = entriesBase.toLong() + entryOffset
+            if (ePosLong < entriesBase.toLong() || ePosLong + 8L > chunkEnd.toLong()) continue
+            val ePos = ePosLong.toInt()
             val entrySize = buf.getShort(ePos).toInt() and 0xFFFF
+            if (entrySize < 8) continue
             val entryFlags = buf.getShort(ePos + 2).toInt() and 0xFFFF
             val keyIdx = buf.getInt(ePos + 4)
             val keyName = keyStrings.getOrElse(keyIdx) { continue }
@@ -263,25 +272,26 @@ object BinaryXmlAndArscDecoder {
 
             val isComplex = (entryFlags and 0x0001) != 0
             if (!isComplex) {
-                val valOff = ePos + entrySize
-                if (valOff + 8 <= chunkEnd) {
+                val valOffLong = ePos.toLong() + entrySize.toLong()
+                if (valOffLong >= ePos.toLong() && valOffLong + 8L <= chunkEnd.toLong()) {
+                    val valOff = valOffLong.toInt()
                     val valType = bytes[valOff + 3].toInt() and 0xFF
                     val valData = buf.getInt(valOff + 4)
                     val formatted = formatTypedValue(valType, valData, globalStrings)
                     out += "$typeName/$keyName = $formatted"
                 }
             } else {
-                // RES_TABLE_MAP_ENTRY (bag/array)
                 if (ePos + 16 <= chunkEnd) {
                     val mapCount = buf.getInt(ePos + 12).coerceIn(0, 32)
-                    var mapPos = ePos + entrySize
+                    var mapPosLong = ePos.toLong() + entrySize.toLong()
                     val items = mutableListOf<String>()
                     repeat(mapCount) {
-                        if (mapPos + 12 <= chunkEnd) {
+                        if (mapPosLong >= ePos.toLong() && mapPosLong + 12L <= chunkEnd.toLong()) {
+                            val mapPos = mapPosLong.toInt()
                             val valType = bytes[mapPos + 7].toInt() and 0xFF
                             val valData = buf.getInt(mapPos + 8)
                             items += formatTypedValue(valType, valData, globalStrings)
-                            mapPos += 12
+                            mapPosLong += 12L
                         }
                     }
                     out += "$typeName/$keyName = [${items.joinToString(", ")}]"
@@ -296,30 +306,32 @@ object BinaryXmlAndArscDecoder {
         poolPos: Int,
         poolSize: Int
     ): List<String> {
-        val poolEnd = (poolPos + poolSize).coerceAtMost(bytes.size)
-        if (poolPos + 28 > poolEnd) return emptyList()
+        val poolEnd = (poolPos.toLong() + poolSize.toLong()).coerceAtMost(bytes.size.toLong()).toInt()
+        if (poolPos < 0 || poolPos + 28 > poolEnd) return emptyList()
 
         val stringCount = buf.getInt(poolPos + 8).coerceIn(0, 60_000)
         val flags = buf.getInt(poolPos + 16)
         val isUtf8 = (flags and (1 shl 8)) != 0
-        val stringsStartRel = buf.getInt(poolPos + 20)
+        val stringsStartRel = buf.getInt(poolPos + 20).toLong() and 0xFFFFFFFFL
         val offsetsBase = poolPos + 28
-        val dataBase = poolPos + stringsStartRel
-        if (dataBase >= poolEnd) return emptyList()
+        val dataBaseLong = poolPos.toLong() + stringsStartRel
+        if (stringsStartRel < 28L || dataBaseLong >= poolEnd.toLong()) return emptyList()
+        val dataBase = dataBaseLong.toInt()
 
         val result = ArrayList<String>(stringCount)
         for (i in 0 until stringCount) {
             val idxPos = offsetsBase + i * 4
-            if (idxPos + 4 > dataBase) {
+            if (idxPos < poolPos || idxPos + 4 > dataBase) {
                 result += ""
                 continue
             }
-            val relStrOff = buf.getInt(idxPos)
-            val strOff = dataBase + relStrOff
-            if (strOff !in dataBase until poolEnd) {
+            val relStrOff = buf.getInt(idxPos).toLong() and 0xFFFFFFFFL
+            val strOffLong = dataBase.toLong() + relStrOff
+            if (strOffLong !in dataBase.toLong() until poolEnd.toLong()) {
                 result += ""
                 continue
             }
+            val strOff = strOffLong.toInt()
             val str = if (isUtf8) {
                 readLengthPrefixedUtf8(bytes, strOff, poolEnd)
             } else {

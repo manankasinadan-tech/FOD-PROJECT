@@ -4,6 +4,11 @@ import com.example.fodtracer.domain.interfaces.*
 import com.example.fodtracer.domain.models.*
 import com.example.fodtracer.system.shell.SafeShellExecutor
 
+import java.io.BufferedInputStream
+import java.io.File
+import java.io.FileInputStream
+import java.util.zip.ZipInputStream
+
 data class DeepArtifactOutput(
     val artifacts: List<DisassembledArtifact>,
     val rawFiles: Map<String, String>
@@ -26,11 +31,21 @@ class DeepArtifactEngine(
         val safeShell = shellExecutor as? SafeShellExecutor
         val artifacts = mutableListOf<DisassembledArtifact>()
         val rawFiles = linkedMapOf<String, String>()
+        var rawCharsTotal = 0
+        val maxTotalRawChars = 4_500_000
         var idx = 0
 
         fun nextId(tag: String): String {
             idx++
             return "DIS-$tag-${idx.toString().padStart(3, '0')}"
+        }
+
+        fun recordRaw(key: String?, content: String) {
+            if (key == null || content.isBlank()) return
+            if (rawCharsTotal >= maxTotalRawChars) return
+            val bounded = content.take((maxTotalRawChars - rawCharsTotal).coerceAtMost(140_000))
+            rawFiles[key] = bounded
+            rawCharsTotal += bounded.length
         }
 
         val discoveredFilePaths = probeResults
@@ -64,11 +79,13 @@ class DeepArtifactEngine(
         )
         for (root in extraRoots) {
             val safeRoot = SafeSystemPath.parse(root) ?: continue
-            val ls = shellExecutor.execute(
-                ShellCommandSpec.ListSystemDir(safeRoot, maxDepth = 3),
-                useRoot = allowRoot,
-                timeoutMs = 2_500L
-            )
+            val ls = runCatching {
+                shellExecutor.execute(
+                    ShellCommandSpec.ListSystemDir(safeRoot, maxDepth = 3),
+                    useRoot = allowRoot,
+                    timeoutMs = 2_500L
+                )
+            }.getOrNull() ?: continue
             if (ls.exitCode == 0) {
                 ls.stdout.lineSequence()
                     .map { it.trim() }
@@ -105,18 +122,20 @@ class DeepArtifactEngine(
         }.distinct().take(45)
 
         for (rawPath in elfCandidates) {
-            val safePath = SafeSystemPath.parse(rawPath) ?: continue
-            val bytes = safeShell?.readBinaryBytes(safePath, useRoot = allowRoot, maxBytes = 4_194_304)
-            if (bytes != null) {
-                val analyzed = ElfDisassembler.analyze(
-                    id = nextId("ELF"),
-                    path = rawPath,
-                    partition = inferPartition(rawPath),
-                    bytes = bytes
-                )
-                if (analyzed != null) {
-                    artifacts += analyzed.first
-                    analyzed.first.rawFileName?.let { rawFiles[it] = analyzed.second }
+            runCatching {
+                val safePath = SafeSystemPath.parse(rawPath) ?: return@runCatching
+                val bytes = safeShell?.readBinaryBytes(safePath, useRoot = allowRoot, maxBytes = 4_194_304)
+                if (bytes != null) {
+                    val analyzed = ElfDisassembler.analyze(
+                        id = nextId("ELF"),
+                        path = rawPath,
+                        partition = inferPartition(rawPath),
+                        bytes = bytes
+                    )
+                    if (analyzed != null) {
+                        artifacts += analyzed.first
+                        recordRaw(analyzed.first.rawFileName, analyzed.second)
+                    }
                 }
             }
         }
@@ -140,25 +159,42 @@ class DeepArtifactEngine(
         }.distinct().take(24)
 
         for (apkPath in apkCandidates) {
-            val safePath = SafeSystemPath.parse(apkPath) ?: continue
-            val maxCap = when {
-                apkPath.contains("SystemUI", true) || apkPath.endsWith("services.jar") || apkPath.endsWith("framework.jar") -> 10_485_760
-                apkPath.contains("framework-res", true) -> 8_388_608
-                else -> 3_145_728
-            }
-            val bytes = safeShell?.readBinaryBytes(safePath, useRoot = allowRoot, maxBytes = maxCap)
-            if (bytes != null) {
+            runCatching {
+                val safePath = SafeSystemPath.parse(apkPath) ?: return@runCatching
                 val isOverlay = apkPath.contains("overlay", true)
-                val analyzed = DexAndApkDisassembler.analyzeApkOrJar(
-                    id = nextId(if (isOverlay) "RRO" else "DEX"),
-                    path = apkPath,
-                    partition = inferPartition(apkPath),
-                    isOverlay = isOverlay,
-                    zipBytes = bytes
-                )
+                val disasmId = nextId(if (isOverlay) "RRO" else "DEX")
+                val directFile = File(apkPath)
+                val analyzed = if (directFile.exists() && directFile.isFile && directFile.canRead()) {
+                    // Stream directly from FileInputStream without buffering a 10+ MB APK byte[] in RAM
+                    ZipInputStream(BufferedInputStream(FileInputStream(directFile))).use { zis ->
+                        DexAndApkDisassembler.analyzeApkOrJarStream(
+                            id = disasmId,
+                            path = apkPath,
+                            partition = inferPartition(apkPath),
+                            isOverlay = isOverlay,
+                            zis = zis
+                        )
+                    }
+                } else {
+                    val maxCap = when {
+                        apkPath.contains("SystemUI", true) || apkPath.endsWith("services.jar") || apkPath.endsWith("framework.jar") -> 6_291_456
+                        apkPath.contains("framework-res", true) -> 6_291_456
+                        else -> 3_145_728
+                    }
+                    val bytes = safeShell?.readBinaryBytes(safePath, useRoot = allowRoot, maxBytes = maxCap)
+                    if (bytes != null) {
+                        DexAndApkDisassembler.analyzeApkOrJar(
+                            id = disasmId,
+                            path = apkPath,
+                            partition = inferPartition(apkPath),
+                            isOverlay = isOverlay,
+                            zipBytes = bytes
+                        )
+                    } else null
+                }
                 if (analyzed != null) {
                     artifacts += analyzed.first
-                    analyzed.first.rawFileName?.let { rawFiles[it] = analyzed.second }
+                    recordRaw(analyzed.first.rawFileName, analyzed.second)
                 }
             }
         }
@@ -169,56 +205,58 @@ class DeepArtifactEngine(
         }.distinct().take(40)
 
         for (cfgPath in textConfigPaths) {
-            val safePath = SafeSystemPath.parse(cfgPath) ?: continue
-            val read = shellExecutor.execute(
-                ShellCommandSpec.ReadSystemFile(safePath),
-                useRoot = allowRoot,
-                timeoutMs = 2_000L,
-                maxOutputBytes = 131_072
-            )
-            if (read.exitCode == 0 && read.stdout.isNotBlank()) {
-                val isVintf = cfgPath.contains("vintf", true)
-                val isRc = cfgPath.endsWith(".rc", true)
-                val allLines = read.stdout.lineSequence().map { it.trimEnd() }.filter { it.isNotBlank() }.toList()
-                val relevantLines = allLines.filter { line ->
-                    val l = line.lowercase()
-                    l.contains("finger") || l.contains("biometric") || l.contains("goodix") ||
-                        l.contains("fpc") || l.contains("silead") || l.contains("focal") ||
-                        l.contains("egis") || l.contains("udfps") || l.contains("fod") ||
-                        l.contains("hbm") || l.contains("lhbm") || l.contains("service ") ||
-                        l.contains("chown") || l.contains("chmod") || l.contains("on property") ||
-                        l.contains("<name>") || l.contains("<fqname>") || l.contains("<hal")
-                }
-
-                if (relevantLines.isNotEmpty() || isVintf || isRc) {
-                    val rawName = "disassembly/${cfgPath.trim('/').replace('/', '_')}.txt"
-                    val fullContent = if (allLines.size <= 350) {
-                        allLines.joinToString("\n")
-                    } else {
-                        relevantLines.take(250).joinToString("\n")
+            runCatching {
+                val safePath = SafeSystemPath.parse(cfgPath) ?: return@runCatching
+                val read = shellExecutor.execute(
+                    ShellCommandSpec.ReadSystemFile(safePath),
+                    useRoot = allowRoot,
+                    timeoutMs = 2_000L,
+                    maxOutputBytes = 131_072
+                )
+                if (read.exitCode == 0 && read.stdout.isNotBlank()) {
+                    val isVintf = cfgPath.contains("vintf", true)
+                    val isRc = cfgPath.endsWith(".rc", true)
+                    val allLines = read.stdout.lineSequence().map { it.trimEnd() }.filter { it.isNotBlank() }.toList()
+                    val relevantLines = allLines.filter { line ->
+                        val l = line.lowercase()
+                        l.contains("finger") || l.contains("biometric") || l.contains("goodix") ||
+                            l.contains("fpc") || l.contains("silead") || l.contains("focal") ||
+                            l.contains("egis") || l.contains("udfps") || l.contains("fod") ||
+                            l.contains("hbm") || l.contains("lhbm") || l.contains("service ") ||
+                            l.contains("chown") || l.contains("chmod") || l.contains("on property") ||
+                            l.contains("<name>") || l.contains("<fqname>") || l.contains("<hal")
                     }
-                    if (fullContent.isNotBlank()) {
-                        rawFiles[rawName] = fullContent
-                        val xrefs = relevantLines.filter {
-                            it.contains("/dev/", true) || it.contains("/sys/", true) ||
-                                it.contains("service ", true) || it.contains("<fqname>", true)
-                        }.take(30)
-                        artifacts += DisassembledArtifact(
-                            id = nextId(if (isVintf) "VINTF" else if (isRc) "RC" else "CFG"),
-                            name = cfgPath.substringAfterLast('/'),
-                            path = cfgPath,
-                            partition = inferPartition(cfgPath),
-                            kind = when {
-                                isVintf -> ArtifactKind.VINTF_XML
-                                isRc -> ArtifactKind.INIT_RC
-                                else -> ArtifactKind.SEPOLICY_OR_PERM
-                            },
-                            extractedStrings = relevantLines.take(50),
-                            disassemblySnippet = relevantLines.ifEmpty { allLines }.take(35).joinToString("\n"),
-                            epistemicLevel = EpistemicLevel.PROVED,
-                            rawFileName = rawName,
-                            crossReferences = xrefs
-                        )
+
+                    if (relevantLines.isNotEmpty() || isVintf || isRc) {
+                        val rawName = "disassembly/${cfgPath.trim('/').replace('/', '_')}.txt"
+                        val fullContent = if (allLines.size <= 350) {
+                            allLines.joinToString("\n")
+                        } else {
+                            relevantLines.take(250).joinToString("\n")
+                        }
+                        if (fullContent.isNotBlank()) {
+                            recordRaw(rawName, fullContent)
+                            val xrefs = relevantLines.filter {
+                                it.contains("/dev/", true) || it.contains("/sys/", true) ||
+                                    it.contains("service ", true) || it.contains("<fqname>", true)
+                            }.take(30)
+                            artifacts += DisassembledArtifact(
+                                id = nextId(if (isVintf) "VINTF" else if (isRc) "RC" else "CFG"),
+                                name = cfgPath.substringAfterLast('/'),
+                                path = cfgPath,
+                                partition = inferPartition(cfgPath),
+                                kind = when {
+                                    isVintf -> ArtifactKind.VINTF_XML
+                                    isRc -> ArtifactKind.INIT_RC
+                                    else -> ArtifactKind.SEPOLICY_OR_PERM
+                                },
+                                extractedStrings = relevantLines.take(50),
+                                disassemblySnippet = relevantLines.ifEmpty { allLines }.take(35).joinToString("\n"),
+                                epistemicLevel = EpistemicLevel.PROVED,
+                                rawFileName = rawName,
+                                crossReferences = xrefs
+                            )
+                        }
                     }
                 }
             }
@@ -246,7 +284,7 @@ class DeepArtifactEngine(
             if (lines.size > 1) {
                 val rawName = "disassembly/proc_${snap.pid}_${snap.processName.replace('/', '_')}.txt"
                 val content = lines.joinToString("\n")
-                rawFiles[rawName] = content
+                recordRaw(rawName, content)
                 artifacts += DisassembledArtifact(
                     id = nextId("PROC"),
                     name = "${snap.processName} (PID ${snap.pid})",

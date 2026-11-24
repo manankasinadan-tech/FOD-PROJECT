@@ -10,6 +10,13 @@ object FodJson {
         prettyPrint = true
         isLenient = false
     }
+
+    val compactCodec: Json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        prettyPrint = false
+        isLenient = true
+    }
 }
 
 /**

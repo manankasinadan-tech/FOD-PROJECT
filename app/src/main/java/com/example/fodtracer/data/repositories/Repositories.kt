@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 
 private val Context.fodDataStore: DataStore<Preferences> by preferencesDataStore(name = "fodtracer_prefs")
@@ -31,20 +32,25 @@ class RoomDiagnosticRepository(
     private val _activeSession = MutableStateFlow<DiagnosticSession?>(null)
     override val activeSession: StateFlow<DiagnosticSession?> = _activeSession.asStateFlow()
 
-    override val sessions: Flow<List<DiagnosticSession>> = dao.observeSessions().map { rows ->
-        rows.mapNotNull { row ->
-            runCatching { FodJson.codec.decodeFromString<DiagnosticSession>(row.payloadJson) }.getOrNull()
+    override val sessions: Flow<List<DiagnosticSession>> = dao.observeSessions()
+        .map { rows ->
+            rows.mapNotNull { row ->
+                runCatching { FodJson.compactCodec.decodeFromString<DiagnosticSession>(row.payloadJson) }.getOrNull()
+            }
         }
-    }
+        .catch { emit(emptyList()) }
 
-    override val comparisons: Flow<List<ComparisonReport>> = dao.observeComparisons().map { rows ->
-        rows.mapNotNull { row ->
-            runCatching { FodJson.codec.decodeFromString<ComparisonReport>(row.payloadJson) }.getOrNull()
+    override val comparisons: Flow<List<ComparisonReport>> = dao.observeComparisons()
+        .map { rows ->
+            rows.mapNotNull { row ->
+                runCatching { FodJson.compactCodec.decodeFromString<ComparisonReport>(row.payloadJson) }.getOrNull()
+            }
         }
-    }
+        .catch { emit(emptyList()) }
 
     override suspend fun saveSession(session: DiagnosticSession) {
-        val json = FodJson.codec.encodeToString(session)
+        archiveManager.persistStructuredSessionDir(session)
+        val dbJson = encodeDbSafeSessionJson(session)
         dao.upsertSession(
             SessionEntity(
                 sessionId = session.sessionId,
@@ -55,20 +61,21 @@ class RoomDiagnosticRepository(
                 romType = session.environment.detectedRomType.name,
                 hasLiveTrace = session.liveTrace != null,
                 anomalyCount = session.anomalies.size,
-                payloadJson = json
+                payloadJson = dbJson
             )
         )
-        archiveManager.persistStructuredSessionDir(session)
         _activeSession.value = session
     }
 
     override suspend fun getSessionById(sessionId: String): DiagnosticSession? {
-        val entity = dao.getSession(sessionId) ?: return null
-        return runCatching { FodJson.codec.decodeFromString<DiagnosticSession>(entity.payloadJson) }.getOrNull()
+        archiveManager.loadFullSessionFromDisk(sessionId)?.let { return it }
+        val entity = runCatching { dao.getSession(sessionId) }.getOrNull() ?: return null
+        return runCatching { FodJson.compactCodec.decodeFromString<DiagnosticSession>(entity.payloadJson) }.getOrNull()
     }
 
     override suspend fun deleteSession(sessionId: String) {
-        dao.deleteSession(sessionId)
+        runCatching { dao.deleteSession(sessionId) }
+        archiveManager.deleteStructuredSessionDir(sessionId)
         if (_activeSession.value?.sessionId == sessionId) {
             _activeSession.value = null
         }
@@ -79,22 +86,80 @@ class RoomDiagnosticRepository(
     }
 
     override suspend fun saveComparison(report: ComparisonReport) {
-        val json = FodJson.codec.encodeToString(report)
-        dao.upsertComparison(
-            ComparisonEntity(
-                comparisonId = report.comparisonId,
-                createdAtCivilMs = report.createdAtCivilMs,
-                archiveALabel = report.archiveALabel,
-                archiveBLabel = report.archiveBLabel,
-                payloadJson = json
+        val json = FodJson.compactCodec.encodeToString(report)
+        if (json.length <= MAX_DB_PAYLOAD_BYTES) {
+            dao.upsertComparison(
+                ComparisonEntity(
+                    comparisonId = report.comparisonId,
+                    createdAtCivilMs = report.createdAtCivilMs,
+                    archiveALabel = report.archiveALabel,
+                    archiveBLabel = report.archiveBLabel,
+                    payloadJson = json
+                )
             )
-        )
+        }
         archiveManager.persistComparisonReport(report)
     }
 
     override suspend fun getComparisonById(comparisonId: String): ComparisonReport? {
-        val entity = dao.getComparison(comparisonId) ?: return null
-        return runCatching { FodJson.codec.decodeFromString<ComparisonReport>(entity.payloadJson) }.getOrNull()
+        val entity = runCatching { dao.getComparison(comparisonId) }.getOrNull() ?: return null
+        return runCatching { FodJson.compactCodec.decodeFromString<ComparisonReport>(entity.payloadJson) }.getOrNull()
+    }
+
+    private fun encodeDbSafeSessionJson(session: DiagnosticSession): String {
+        // Never inline rawArtifacts into SQLite (stored on disk in diagnostics/<id>/ & session_full.json)
+        val noRaw = session.copy(rawArtifacts = emptyMap())
+        val firstPass = FodJson.compactCodec.encodeToString(noRaw)
+        if (firstPass.length <= MAX_DB_PAYLOAD_BYTES) return firstPass
+
+        // Second pass: trim disassembly snippets & long trace buffers in the SQLite summary row
+        val trimmedDisasm = noRaw.disassembledArtifacts.map { art ->
+            art.copy(
+                keySymbols = art.keySymbols.take(25),
+                extractedStrings = art.extractedStrings.take(25),
+                crossReferences = art.crossReferences.take(25),
+                decodedResources = art.decodedResources.take(30),
+                disassemblySnippet = art.disassemblySnippet.lines().take(12).joinToString("\n")
+            )
+        }
+        val trimmedLive = noRaw.liveTrace?.copy(
+            events = noRaw.liveTrace.events.take(250),
+            binderTransactions = noRaw.liveTrace.binderTransactions.take(40),
+            tracefsEvents = noRaw.liveTrace.tracefsEvents.take(40),
+            dumpsysDiffs = noRaw.liveTrace.dumpsysDiffs.take(15),
+            surfaceFlingerSnapshot = noRaw.liveTrace.surfaceFlingerSnapshot?.take(8_000),
+            dumpsysFingerprintDelta = noRaw.liveTrace.dumpsysFingerprintDelta?.take(8_000),
+            runtimeSnapshots = noRaw.liveTrace.runtimeSnapshots.take(15)
+        )
+        val secondPass = FodJson.compactCodec.encodeToString(
+            noRaw.copy(
+                disassembledArtifacts = trimmedDisasm,
+                liveTrace = trimmedLive
+            )
+        )
+        if (secondPass.length <= MAX_DB_PAYLOAD_BYTES) return secondPass
+
+        // Final fallback: keep core environment, probes, mechanism steps & solutions strictly under CursorWindow limit
+        return FodJson.compactCodec.encodeToString(
+            noRaw.copy(
+                disassembledArtifacts = emptyList(),
+                evidence = noRaw.evidence.take(120),
+                liveTrace = trimmedLive?.copy(
+                    events = trimmedLive.events.take(80),
+                    binderTransactions = emptyList(),
+                    tracefsEvents = emptyList(),
+                    dumpsysDiffs = emptyList(),
+                    surfaceFlingerSnapshot = null,
+                    dumpsysFingerprintDelta = null,
+                    runtimeSnapshots = trimmedLive.runtimeSnapshots.take(8),
+                    rawBufferTruncated = true
+                )
+            )
+        )
+    }
+
+    companion object {
+        private const val MAX_DB_PAYLOAD_BYTES = 850_000
     }
 }
 

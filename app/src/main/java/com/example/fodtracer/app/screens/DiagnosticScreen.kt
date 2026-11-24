@@ -665,8 +665,8 @@ private fun DashboardSectionContent(
                         }
                     }
                 } else {
-                    items(session.disassembledArtifacts, key = { it.id }) { artifact ->
-                        var expanded by remember(artifact.id) { mutableStateOf(false) }
+                    items(session.disassembledArtifacts, key = { "${it.path}|${it.kind.name}|${it.id}" }) { artifact ->
+                        var expanded by remember(artifact.path, artifact.kind) { mutableStateOf(false) }
                         val rawDump = artifact.rawFileName?.let { session.rawArtifacts[it] } ?: artifact.disassemblySnippet
                         LabCard(modifier = Modifier.fillMaxWidth()) {
                             Row(

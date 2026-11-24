@@ -39,9 +39,9 @@ class ArchiveManager(
 
     fun persistStructuredSessionDir(session: DiagnosticSession) {
         val roots = listOfNotNull(privateRootDir(), publicRootDirIfWritable())
-        val filesMap = buildStructuredFileMap(session)
-        val markdown = MarkdownReportExporter.generateMarkdown(session)
-        roots.forEach { root ->
+        val filesMap = runCatching { buildStructuredFileMap(session) }.getOrNull() ?: return
+
+        roots.forEachIndexed { rootIndex, root ->
             runCatching {
                 val diagDir = File(File(root, "diagnostics"), session.sessionId)
                 diagDir.mkdirs()
@@ -50,10 +50,57 @@ class ArchiveManager(
                     outFile.parentFile?.mkdirs()
                     outFile.writeText(content, StandardCharsets.UTF_8)
                 }
-                // Auto-save full standalone .md report inside session dir and exports dir
-                File(diagDir, "${session.sessionId}.md").writeText(markdown, StandardCharsets.UTF_8)
+                if (rootIndex == 0) {
+                    // Store lossless compact JSON in private storage so Room never hits 2MB CursorWindow limit
+                    val fullJson = FodJson.compactCodec.encodeToString(session)
+                    File(diagDir, "session_full.json").writeText(fullJson, StandardCharsets.UTF_8)
+                }
+                // Stream full standalone .md report inside session dir and exports dir
+                val sessionMd = File(diagDir, "${session.sessionId}.md")
+                BufferedWriter(OutputStreamWriter(FileOutputStream(sessionMd), StandardCharsets.UTF_8)).use { w ->
+                    MarkdownReportExporter.writeMarkdown(session, w) { rawKey ->
+                        resolveRawArtifactFromDisk(session.sessionId, rawKey)
+                    }
+                }
                 val exportsDir = File(root, "exports").apply { mkdirs() }
-                File(exportsDir, "${session.sessionId}.md").writeText(markdown, StandardCharsets.UTF_8)
+                val exportMd = File(exportsDir, "${session.sessionId}.md")
+                sessionMd.copyTo(exportMd, overwrite = true)
+            }
+        }
+    }
+
+    fun loadFullSessionFromDisk(sessionId: String): DiagnosticSession? {
+        if (sessionId.isBlank() || sessionId.contains("..") || sessionId.contains("/")) return null
+        return runCatching {
+            val diagDir = File(File(privateRootDir(), "diagnostics"), sessionId)
+            val fullFile = File(diagDir, "session_full.json")
+            if (fullFile.exists() && fullFile.isFile && fullFile.length() in 1L..24_000_000L) {
+                FodJson.compactCodec.decodeFromString<DiagnosticSession>(fullFile.readText(StandardCharsets.UTF_8))
+            } else {
+                null
+            }
+        }.getOrNull()
+    }
+
+    fun resolveRawArtifactFromDisk(sessionId: String, rawKey: String): String? {
+        if (sessionId.isBlank() || sessionId.contains("..")) return null
+        val cleaned = rawKey.trimStart('/').replace("..", "_")
+        val diagDir = File(File(privateRootDir(), "diagnostics"), sessionId)
+        val candidates = listOf(
+            File(diagDir, cleaned),
+            File(diagDir, "disassembly/$cleaned"),
+            File(diagDir, "raw/$cleaned")
+        )
+        return candidates.firstOrNull { it.exists() && it.isFile && it.length() <= 2_000_000L }
+            ?.let { runCatching { it.readText(StandardCharsets.UTF_8) }.getOrNull() }
+    }
+
+    fun deleteStructuredSessionDir(sessionId: String) {
+        if (sessionId.isBlank() || sessionId.contains("..")) return
+        val roots = listOfNotNull(privateRootDir(), publicRootDirIfWritable())
+        roots.forEach { root ->
+            runCatching {
+                File(File(root, "diagnostics"), sessionId).deleteRecursively()
             }
         }
     }
@@ -75,15 +122,14 @@ class ArchiveManager(
         destinationUri: Uri?
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val exportSession = if (anonymize) ReportAnonymizer.anonymize(session) else session
+            val hydrated = rehydrateRawIfNeeded(session)
+            val exportSession = if (anonymize) ReportAnonymizer.anonymize(hydrated) else hydrated
             val fileMap = buildStructuredFileMap(exportSession)
             val fileName = "${exportSession.sessionId}${if (anonymize) "_anon" else ""}.fodtracer.zip"
 
-            val zipBytes = createZipBytes(fileMap)
-
             if (destinationUri != null) {
                 context.contentResolver.openOutputStream(destinationUri)?.use { out ->
-                    out.write(zipBytes)
+                    writeZipToStream(fileMap, out)
                     out.flush()
                 } ?: throw IOException("Unable to open SAF destination stream.")
                 return@runCatching "SAF:$fileName"
@@ -93,7 +139,10 @@ class ArchiveManager(
                 ?: File(privateRootDir(), "exports")
             targetDir.mkdirs()
             val targetFile = File(targetDir, fileName)
-            targetFile.writeBytes(zipBytes)
+            FileOutputStream(targetFile).use { out ->
+                writeZipToStream(fileMap, out)
+                out.flush()
+            }
             targetFile.absolutePath
         }
     }
@@ -104,14 +153,15 @@ class ArchiveManager(
         destinationUri: Uri?
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val exportSession = if (anonymize) ReportAnonymizer.anonymize(session) else session
-            val markdown = MarkdownReportExporter.generateMarkdown(exportSession)
+            val hydrated = rehydrateRawIfNeeded(session)
+            val exportSession = if (anonymize) ReportAnonymizer.anonymize(hydrated) else hydrated
             val fileName = "${exportSession.sessionId}${if (anonymize) "_anon" else ""}.md"
 
             if (destinationUri != null) {
                 context.contentResolver.openOutputStream(destinationUri)?.use { out ->
-                    out.write(markdown.toByteArray(StandardCharsets.UTF_8))
-                    out.flush()
+                    BufferedWriter(OutputStreamWriter(out, StandardCharsets.UTF_8)).use { w ->
+                        MarkdownReportExporter.writeMarkdown(exportSession, w)
+                    }
                 } ?: throw IOException("Unable to open SAF destination stream.")
                 return@runCatching "SAF:$fileName"
             }
@@ -120,9 +170,25 @@ class ArchiveManager(
                 ?: File(privateRootDir(), "exports")
             targetDir.mkdirs()
             val targetFile = File(targetDir, fileName)
-            targetFile.writeText(markdown, StandardCharsets.UTF_8)
+            BufferedWriter(OutputStreamWriter(FileOutputStream(targetFile), StandardCharsets.UTF_8)).use { w ->
+                MarkdownReportExporter.writeMarkdown(exportSession, w)
+            }
             targetFile.absolutePath
         }
+    }
+
+    private fun rehydrateRawIfNeeded(session: DiagnosticSession): DiagnosticSession {
+        if (session.rawArtifacts.isNotEmpty() || session.disassembledArtifacts.isEmpty()) return session
+        val fromDisk = loadFullSessionFromDisk(session.sessionId)
+        if (fromDisk != null && fromDisk.rawArtifacts.isNotEmpty()) {
+            return fromDisk.copy(aiAnalysis = session.aiAnalysis ?: fromDisk.aiAnalysis)
+        }
+        val recoveredRaw = linkedMapOf<String, String>()
+        session.disassembledArtifacts.forEach { art ->
+            val key = art.rawFileName ?: return@forEach
+            resolveRawArtifactFromDisk(session.sessionId, key)?.let { recoveredRaw[key] = it }
+        }
+        return if (recoveredRaw.isEmpty()) session else session.copy(rawArtifacts = recoveredRaw)
     }
 
     override suspend fun importDiagnosticZip(sourceUri: Uri): Result<DiagnosticSession> = withContext(Dispatchers.IO) {
@@ -166,7 +232,8 @@ class ArchiveManager(
         map["solutions.json"] = FodJson.codec.encodeToString(session.solutions)
         map["disassembly.json"] = FodJson.codec.encodeToString(session.disassembledArtifacts)
         map["mechanism.json"] = FodJson.codec.encodeToString(session.mechanismSteps)
-        map["session.json"] = FodJson.codec.encodeToString(session)
+        // Store compact session JSON inside ZIP so archive sizes remain clean while individual raw/* files stay intact
+        map["session.json"] = FodJson.compactCodec.encodeToString(session.copy(rawArtifacts = emptyMap()))
         session.rawArtifacts.forEach { (rawName, rawContent) ->
             val cleaned = rawName.trimStart('/').replace("..", "_")
             val targetPath = when {
@@ -203,9 +270,8 @@ class ArchiveManager(
         return map
     }
 
-    fun createZipBytes(files: Map<String, String>): ByteArray {
-        val baos = ByteArrayOutputStream()
-        ZipOutputStream(BufferedOutputStream(baos)).use { zos ->
+    fun writeZipToStream(files: Map<String, String>, outputStream: OutputStream) {
+        ZipOutputStream(BufferedOutputStream(outputStream)).use { zos ->
             files.forEach { (name, content) ->
                 val entry = ZipEntry(name)
                 zos.putNextEntry(entry)
@@ -213,6 +279,11 @@ class ArchiveManager(
                 zos.closeEntry()
             }
         }
+    }
+
+    fun createZipBytes(files: Map<String, String>): ByteArray {
+        val baos = ByteArrayOutputStream()
+        writeZipToStream(files, baos)
         return baos.toByteArray()
     }
 
@@ -234,7 +305,6 @@ class ArchiveManager(
                 }
 
                 val name = entry.name
-                // Zip-Slip & path normalization verification
                 if (name.isBlank() || name.startsWith("/") || name.startsWith("\\") || name.contains("..")) {
                     throw SecurityException("Rejected unsafe ZIP entry path: $name")
                 }
@@ -277,7 +347,6 @@ class ArchiveManager(
             throw SecurityException("Incompatible archive schemaVersion: ${manifest.schemaVersion}")
         }
 
-        // Verify SHA-256 integrity of every file declared in manifest
         manifest.fileSha256.forEach { (fileName, expectedHash) ->
             val fileBytes = entriesMap[fileName]
                 ?: throw SecurityException("Archive integrity failure: missing file $fileName declared in manifest.")
@@ -287,12 +356,23 @@ class ArchiveManager(
             }
         }
 
-        // Reconstruct DiagnosticSession cleanly (preferring session.json, or assembling modular JSON parts)
+        val recoveredRaw = linkedMapOf<String, String>()
+        entriesMap.forEach { (entryName, bytes) ->
+            if (entryName.startsWith("disassembly/") || entryName.startsWith("raw/")) {
+                recoveredRaw[entryName] = String(bytes, StandardCharsets.UTF_8)
+            }
+        }
+
         val sessionBytes = entriesMap["session.json"]
         if (sessionBytes != null) {
-            return FodJson.codec.decodeFromString<DiagnosticSession>(
+            val decoded = FodJson.codec.decodeFromString<DiagnosticSession>(
                 String(sessionBytes, StandardCharsets.UTF_8)
             )
+            return if (decoded.rawArtifacts.isEmpty() && recoveredRaw.isNotEmpty()) {
+                decoded.copy(rawArtifacts = recoveredRaw)
+            } else {
+                decoded
+            }
         }
 
         val env = FodJson.codec.decodeFromString<DeviceEnvironment>(
@@ -345,6 +425,7 @@ class ArchiveManager(
             hypotheses = hypotheses,
             solutions = solutions,
             isAnonymized = manifest.isAnonymized,
+            rawArtifacts = recoveredRaw,
             disassembledArtifacts = disassembled,
             mechanismSteps = mechanism
         )
